@@ -1,0 +1,19 @@
+# Node
+node_modules
+frontend/dist
+.DS_Store
+
+# Rust
+target/
+Cargo.lock
+
+# Tauri
+src-tauri/target/
+
+# IDE
+.vscode/
+.idea/
+
+# AI development and reference files
+ai-dev/
+reference/

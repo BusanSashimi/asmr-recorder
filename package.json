@@ -1,0 +1,13 @@
+{
+  "name": "asmr-recorder-root",
+  "private": true,
+  "scripts": {
+    "tauri": "export PATH=\"$HOME/.cargo/bin:$PATH\"; tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

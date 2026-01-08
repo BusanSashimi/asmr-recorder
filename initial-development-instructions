@@ -1,0 +1,94 @@
+# 🚀 Mission: ASMR Recorder Initialization
+
+## Objective
+Initialize a desktop application project for an ASMR recorder using the Tauri (v2), Rust, and React (TypeScript) stack. The application will record high-fidelity audio and screen input. The setup should prioritize developer experience and provide clear instructions for local environment setup.
+
+## Deliverables
+1.  **Tauri Project Structure:** A fully initialized Tauri v2 project with a React (TypeScript) frontend.
+2.  **Rust Audio & Screen Capture Setup:** Basic Rust module setup for high-fidelity audio input using `cpal` and screen capture using `scrap` or `tauri-plugin-screenshots`.
+3.  **React UI Placeholders:** A minimal React component structure (e.g., `App.tsx`, `Recorder.tsx`) with basic UI elements (start/stop button, audio level indicator).
+4.  **Local Development Configuration:** Ensure `tauri dev` works seamlessly and provide a `README.md` with clear setup instructions.
+5.  **Git Initialization:** Initialize a Git repository with a `.gitignore` file suitable for a Tauri + React project.
+
+## Agent Instructions
+
+### Phase 1: Project Scaffolding (Frontend + Tauri)
+
+**Agent Goal:** Set up the basic Tauri project with a React frontend.
+
+1.  **Create Project Directory:** Create a new directory named `ASMR-Recorder`.
+2.  **Initialize React App:**
+    * Navigate into `ASMR-Recorder`.
+    * Use `npm create vite@latest frontend -- --template react-ts` to create the React TypeScript frontend in a `frontend` subdirectory.
+3.  **Initialize Tauri Project:**
+    * Navigate back to the root `ASMR-Recorder` directory.
+    * Run `npm create tauri-app@latest -- --directory . --frontend-dist-dir ./frontend/dist --template react-ts` to initialize Tauri in the current directory, linking it to the `frontend` build.
+4.  **Install Dependencies:**
+    * Navigate to the `frontend` directory and run `npm install`.
+    * Navigate to the `ASMR-Recorder` root and run `npm install`.
+
+### Phase 2: Rust Backend for Audio & Screen Capture
+
+**Agent Goal:** Configure the Rust backend (`src-tauri/src/main.rs` and potentially new modules) for advanced audio and screen recording.
+
+1.  **Add Rust Dependencies:**
+    * Open `src-tauri/Cargo.toml`.
+    * Add `cpal = "0.15"` for audio input.
+    * Add `scrap = "0.5"` for screen capture (or `tauri-plugin-screenshots = "0.6"` if preferred for ease of use, confirm latest version).
+    * Add `ffmpeg-next = "7.0"` (or later) for potential audio/video processing and muxing.
+2.  **Basic Audio Module (`src-tauri/src/audio.rs`):**
+    * Create `src-tauri/src/audio.rs`.
+    * Implement a basic `start_audio_capture` function that initializes `cpal`, lists available input devices, and attempts to open a default stream at a high sample rate (e.g., 96kHz, 24-bit). This function should just print to console for now, confirming device detection.
+    * Expose this function to the frontend using `#[tauri::command]`.
+3.  **Basic Screen Capture Module (`src-tauri/src/screen.rs`):**
+    * Create `src-tauri/src/screen.rs`.
+    * Implement a `start_screen_capture` function that uses `scrap` to capture a single frame or starts a capture loop. For now, it should just log a success message.
+    * Expose this function to the frontend using `#[tauri::command]`.
+4.  **Integrate Modules in `main.rs`:**
+    * Modify `src-tauri/src/main.rs` to import and register the commands from `audio.rs` and `screen.rs`.
+
+### Phase 3: React UI Placeholders
+
+**Agent Goal:** Create minimal React components to interact with the Tauri backend.
+
+1.  **`frontend/src/App.tsx`:**
+    * Keep the existing structure.
+2.  **`frontend/src/components/Recorder.tsx`:**
+    * Create this file.
+    * Add a simple "Start Recording" button and a "Stop Recording" button.
+    * Use `import { invoke } from '@tauri-apps/api/tauri'` to call the Rust commands (`start_audio_capture`, `start_screen_capture`).
+    * Display basic status messages (e.g., "Ready to record", "Recording...").
+3.  **Integrate `Recorder.tsx`:**
+    * Import and render the `Recorder` component in `frontend/src/App.tsx`.
+
+### Phase 4: Developer Experience & Git Init
+
+**Agent Goal:** Ensure a smooth local development environment and version control.
+
+1.  **`README.md`:**
+    * Create a `README.md` in the `ASMR-Recorder` root.
+    * Include sections:
+        * "Project Setup" (prerequisites: Node.js, Rust, Tauri CLI).
+        * "Installation" (`npm install` for frontend, `npm install` for root).
+        * "Running in Development" (`npm run tauri dev`).
+        * "Building for Production" (`npm run tauri build`).
+        * "Key Commands" (`tauri dev`, `tauri build`).
+        * Brief explanation of the stack (Tauri, Rust, React, `cpal`, `scrap`).
+2.  **Git Initialization:**
+    * Initialize a Git repository (`git init`).
+    * Create a `.gitignore` file at the root.
+    * Include standard entries for Node.js (`node_modules`), Rust (`target/`, `Cargo.lock`), and common OS files (`.DS_Store`, `Thumbs.db`).
+    * Perform an initial commit: `git add .` then `git commit -m "feat: Initial project setup for ASMR Recorder with Tauri + React + Rust"`
+
+## Verification
+
+* The project structure should be clean and follow Tauri conventions.
+* `npm run tauri dev` should successfully launch the React app within the Tauri window.
+* Clicking the "Start Recording" button in the UI should invoke the Rust backend and log messages from `cpal` and `scrap` to the terminal where `tauri dev` is running, confirming the Rust commands are being called.
+* A `README.md` and `.gitignore` should be present and correctly configured.
+
+## Notes for Antigravity:
+* Prioritize `cargo fmt` for Rust code.
+* Ensure all necessary `use` statements are added in Rust files.
+* For `scrap` or `tauri-plugin-screenshots`, ensure the necessary OS-level dependencies are mentioned in the `README.md` (e.g., `libxcb` on Linux, although Tauri often abstracts this). Assume a macOS/Windows target initially.
+* If `ffmpeg-next` causes compilation issues, comment it out for the initial setup and note it for later integration.
