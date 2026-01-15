@@ -94,7 +94,13 @@ impl RecordingManager {
             };
             
             let screen_capture = ScreenCapture::new(screen_config)
-                .map_err(|e| format!("Failed to initialize screen capture: {}", e))?;
+                .map_err(|e| {
+                    if e.contains("permission") || e.contains("other error") {
+                        format!("Screen Recording permission required. Open System Settings → Privacy & Security → Screen Recording and enable access for this app.")
+                    } else {
+                        format!("Failed to initialize screen capture: {}", e)
+                    }
+                })?;
             
             let dims = screen_capture.dimensions();
             self.screen_capture = Some(screen_capture);

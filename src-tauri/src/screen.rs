@@ -170,7 +170,14 @@ fn capture_loop(
     let height = display.height() as u32;
     
     let mut capturer = Capturer::new(display)
-        .map_err(|e| format!("Failed to create capturer: {}", e))?;
+        .map_err(|e| {
+            let error_msg = format!("{}", e);
+            if error_msg.contains("other error") || error_msg.contains("permission") {
+                format!("Screen recording permission denied. Please grant permission in System Settings → Privacy & Security → Screen Recording")
+            } else {
+                format!("Failed to create capturer: {}", e)
+            }
+        })?;
     
     let frame_duration = Duration::from_secs_f64(1.0 / fps as f64);
     let start_time = Instant::now();
@@ -228,6 +235,20 @@ pub fn start_screen_capture() {
             println!("Screen capture initialized (use new recording API for actual capture).");
         }
         Err(e) => println!("Failed to find primary display: {}", e),
+    }
+}
+
+/// Check if screen recording permission is granted
+#[command]
+pub fn check_screen_recording_permission() -> Result<bool, String> {
+    match Display::primary() {
+        Ok(display) => {
+            match Capturer::new(display) {
+                Ok(_) => Ok(true),
+                Err(_) => Ok(false),
+            }
+        }
+        Err(e) => Err(format!("Failed to access display: {}", e)),
     }
 }
 
