@@ -53,5 +53,5 @@ chrono = "0.4"
 dirs = "5.0"
 
 [features]
-default = []
+default = ["ffmpeg"]
 ffmpeg = ["ffmpeg-next"]

@@ -6,7 +6,7 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 /// A composited video frame ready for encoding
 #[derive(Clone)]
 pub struct CompositeFrame {
-    /// RGB pixel data
+    /// RGBA pixel data
     pub data: Vec<u8>,
     /// Frame width
     pub width: u32,
@@ -118,11 +118,8 @@ impl VideoCompositor {
             }
         }
         
-        // Convert to RGB for encoding
-        let rgb_data = self.rgba_to_rgb(&output);
-        
         CompositeFrame {
-            data: rgb_data,
+            data: output.into_raw(),
             width: self.config.output_width,
             height: self.config.output_height,
             timestamp: screen_frame.timestamp,
@@ -210,20 +207,6 @@ impl VideoCompositor {
         }
     }
     
-    /// Convert RGBA image to RGB byte vector
-    fn rgba_to_rgb(&self, image: &RgbaImage) -> Vec<u8> {
-        let pixel_count = (self.config.output_width * self.config.output_height) as usize;
-        let mut rgb = Vec::with_capacity(pixel_count * 3);
-        
-        for pixel in image.pixels() {
-            rgb.push(pixel[0]); // R
-            rgb.push(pixel[1]); // G
-            rgb.push(pixel[2]); // B
-        }
-        
-        rgb
-    }
-    
     /// Create a composite frame from only a webcam frame (no screen)
     /// 
     /// This is useful when only webcam recording is selected
@@ -243,10 +226,8 @@ impl VideoCompositor {
             image::imageops::FilterType::Triangle,
         );
         
-        let rgb_data = self.rgba_to_rgb(&scaled);
-        
         CompositeFrame {
-            data: rgb_data,
+            data: scaled.into_raw(),
             width: self.config.output_width,
             height: self.config.output_height,
             timestamp: webcam_frame.timestamp,

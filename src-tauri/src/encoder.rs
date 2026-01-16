@@ -183,8 +183,8 @@ fn encode_loop_fallback(
                 // Save frame as PNG
                 let frame_path = frames_dir.join(format!("frame_{:06}.png", frame_count));
                 
-                // Convert RGB to image and save
-                if let Some(img) = image::RgbImage::from_raw(
+                // Convert RGBA to image and save
+                if let Some(img) = image::RgbaImage::from_raw(
                     config.width,
                     config.height,
                     composite_frame.data.clone(),
@@ -192,6 +192,10 @@ fn encode_loop_fallback(
                     if let Err(e) = img.save(&frame_path) {
                         eprintln!("Failed to save frame: {}", e);
                     }
+                } else {
+                    eprintln!("Failed to create image from frame data (expected {} bytes, got {})",
+                        config.width * config.height * 4,
+                        composite_frame.data.len());
                 }
                 
                 frame_count += 1;
@@ -246,6 +250,7 @@ fn encode_loop_ffmpeg(
     config: EncoderConfig,
 ) -> Result<(), String> {
     use ffmpeg_next as ffmpeg;
+    use ffmpeg_next::software::scaling::{context::Context, flag::Flags};
     
     // Initialize FFmpeg
     ffmpeg::init().map_err(|e| format!("FFmpeg init failed: {}", e))?;
@@ -269,16 +274,21 @@ fn encode_loop_ffmpeg(
     let video_stream_index = video_stream.index();
     
     // Configure video encoder
-    let mut video_encoder = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())
-        .map_err(|e| format!("Failed to create video context: {}", e))?
-        .encoder()
-        .video()
-        .map_err(|e| format!("Failed to create video encoder: {}", e))?;
+    let mut video_encoder_context = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())
+        .map_err(|e| format!("Failed to create video context: {}", e))?;
     
-    video_encoder.set_width(config.width);
-    video_encoder.set_height(config.height);
-    video_encoder.set_format(ffmpeg::format::Pixel::YUV420P);
-    video_encoder.set_time_base(ffmpeg::Rational(1, config.frame_rate as i32));
+    video_encoder_context.set_width(config.width);
+    video_encoder_context.set_height(config.height);
+    video_encoder_context.set_format(ffmpeg::format::Pixel::YUV420P);
+    video_encoder_context.set_time_base(ffmpeg::Rational(1, config.frame_rate as i32));
+    
+    if output.format().flags().contains(ffmpeg::format::flag::GLOBAL_HEADER) {
+        video_encoder_context.set_flags(ffmpeg::codec::flag::GLOBAL_HEADER);
+    }
+    
+    let mut video_encoder = video_encoder_context.encoder().video()
+        .map_err(|e| format!("Failed to create video encoder: {}", e))?;
+        
     video_encoder.set_frame_rate(Some(ffmpeg::Rational(config.frame_rate as i32, 1)));
     video_encoder.set_bit_rate(config.quality.video_bitrate() as usize * 1000);
     
@@ -325,12 +335,23 @@ fn encode_loop_ffmpeg(
     let mut frame_count: i64 = 0;
     let mut audio_pts: i64 = 0;
     
-    // Create video frame buffer
-    let mut video_frame = ffmpeg::frame::Video::new(
+    // Create video frame buffer for the encoded format
+    let mut yuv_frame = ffmpeg::frame::Video::new(
         ffmpeg::format::Pixel::YUV420P,
         config.width,
         config.height,
     );
+    
+    // Create a scaler for converting from RGBA to YUV420P
+    let mut scaler = Context::get(
+        ffmpeg::format::Pixel::RGBA,
+        config.width,
+        config.height,
+        ffmpeg::format::Pixel::YUV420P,
+        config.width,
+        config.height,
+        Flags::BILINEAR,
+    ).map_err(|e| format!("Failed to create scaler: {}", e))?;
     
     // Create audio frame buffer
     let samples_per_frame = audio_encoder.frame_size() as usize;
@@ -347,23 +368,25 @@ fn encode_loop_ffmpeg(
         // Process video frames
         if let Some(ref receiver) = video_receiver {
             while let Ok(composite_frame) = receiver.try_recv() {
-                // Convert RGB to YUV420P
-                if let Err(e) = rgb_to_yuv420p(
-                    &composite_frame.data,
+                // Create a temporary frame from the incoming RGBA data
+                let rgba_frame = ffmpeg::frame::Video::from_data(
+                    composite_frame.data.clone(),
                     config.width,
                     config.height,
-                    &mut video_frame,
-                ) {
-                    eprintln!("RGB to YUV conversion error: {}", e);
+                );
+                
+                // Convert RGBA to YUV420P
+                if let Err(e) = scaler.run(&rgba_frame, &mut yuv_frame) {
+                    eprintln!("RGBA to YUV conversion error: {}", e);
                     continue;
                 }
                 
-                video_frame.set_pts(Some(frame_count));
+                yuv_frame.set_pts(Some(frame_count));
                 
                 // Encode video frame
                 if let Err(e) = encode_video_frame(
                     &video_encoder,
-                    &video_frame,
+                    &yuv_frame,
                     &mut output,
                     video_stream_index,
                     video_stream.time_base(),
@@ -431,51 +454,6 @@ fn encode_loop_ffmpeg(
         .map_err(|e| format!("Failed to write trailer: {}", e))?;
     
     println!("Encoding complete: {} frames", frame_count);
-    
-    Ok(())
-}
-
-/// Convert RGB data to YUV420P format
-#[cfg(feature = "ffmpeg")]
-fn rgb_to_yuv420p(
-    rgb: &[u8],
-    width: u32,
-    height: u32,
-    frame: &mut ffmpeg_next::frame::Video,
-) -> Result<(), String> {
-    let y_plane = frame.data_mut(0);
-    let u_plane = frame.data_mut(1);
-    let v_plane = frame.data_mut(2);
-    
-    let y_stride = frame.stride(0);
-    let u_stride = frame.stride(1);
-    let v_stride = frame.stride(2);
-    
-    for y in 0..height as usize {
-        for x in 0..width as usize {
-            let rgb_offset = (y * width as usize + x) * 3;
-            let r = rgb[rgb_offset] as f32;
-            let g = rgb[rgb_offset + 1] as f32;
-            let b = rgb[rgb_offset + 2] as f32;
-            
-            // RGB to YUV conversion (BT.601)
-            let y_val = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
-            
-            y_plane[y * y_stride + x] = y_val;
-            
-            // Subsample U and V (2x2 blocks)
-            if x % 2 == 0 && y % 2 == 0 {
-                let u_val = (128.0 - 0.169 * r - 0.331 * g + 0.500 * b) as u8;
-                let v_val = (128.0 + 0.500 * r - 0.419 * g - 0.081 * b) as u8;
-                
-                let uv_x = x / 2;
-                let uv_y = y / 2;
-                
-                u_plane[uv_y * u_stride + uv_x] = u_val;
-                v_plane[uv_y * v_stride + uv_x] = v_val;
-            }
-        }
-    }
     
     Ok(())
 }

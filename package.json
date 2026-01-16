@@ -2,7 +2,8 @@
   "name": "asmr-recorder-root",
   "private": true,
   "scripts": {
-    "tauri": "export PATH=\"$HOME/.cargo/bin:$PATH\"; tauri"
+    "tauri": "export PATH=\"$HOME/.cargo/bin:$PATH\"; tauri",
+    "tauri:dev": "npm run tauri dev"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

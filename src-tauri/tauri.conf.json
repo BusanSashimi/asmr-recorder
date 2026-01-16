@@ -5,7 +5,7 @@
   "identifier": "com.asmr-recorder.app",
   "build": {
     "beforeDevCommand": "npm run dev --prefix frontend",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://localhost:5178",
     "beforeBuildCommand": "npm run build --prefix frontend",
     "frontendDist": "../frontend/dist"
   },

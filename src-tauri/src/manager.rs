@@ -181,6 +181,9 @@ impl RecordingManager {
         
         self.encoder = Some(Encoder::new(encoder_config));
         
+        // Store config BEFORE starting pipeline (needed by compositor thread)
+        self.config = Some(config);
+        
         // Connect components and start capture
         self.start_capture_pipeline()?;
         
@@ -193,8 +196,6 @@ impl RecordingManager {
             status.output_path = Some(output_path);
             status.error = None;
         }
-        
-        self.config = Some(config);
         
         println!("Recording manager started");
         

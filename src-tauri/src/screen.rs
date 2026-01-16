@@ -9,45 +9,50 @@ use tauri::command;
 /// Represents a captured screen frame
 #[derive(Clone)]
 pub struct ScreenFrame {
-    /// Raw BGRA pixel data
+    /// Raw BGRA pixel data (may include row padding)
     pub data: Vec<u8>,
-    /// Frame width
+    /// Frame width in pixels
     pub width: u32,
-    /// Frame height
+    /// Frame height in pixels
     pub height: u32,
+    /// Actual bytes per row (may be larger than width * 4 due to alignment)
+    pub stride: usize,
     /// Timestamp when frame was captured
     pub timestamp: Duration,
 }
 
 impl ScreenFrame {
-    /// Convert BGRA to RGB format
-    pub fn to_rgb(&self) -> Vec<u8> {
-        let pixel_count = (self.width * self.height) as usize;
-        let mut rgb = Vec::with_capacity(pixel_count * 3);
-        
-        for i in 0..pixel_count {
-            let offset = i * 4;
-            // BGRA -> RGB
-            rgb.push(self.data[offset + 2]); // R
-            rgb.push(self.data[offset + 1]); // G
-            rgb.push(self.data[offset]);     // B
-        }
-        
-        rgb
-    }
-    
-    /// Convert BGRA to RGBA format
+    /// Convert platform-specific pixel data (BGRA or ARGB) to RGBA format
+    /// 
+    /// This method properly handles row stride/padding by iterating row-by-row
+    /// rather than assuming tightly-packed pixel data.
     pub fn to_rgba(&self) -> Vec<u8> {
-        let pixel_count = (self.width * self.height) as usize;
-        let mut rgba = Vec::with_capacity(pixel_count * 4);
+        let output_size = (self.width * self.height * 4) as usize;
+        let mut rgba = Vec::with_capacity(output_size);
         
-        for i in 0..pixel_count {
-            let offset = i * 4;
-            // BGRA -> RGBA
-            rgba.push(self.data[offset + 2]); // R
-            rgba.push(self.data[offset + 1]); // G
-            rgba.push(self.data[offset]);     // B
-            rgba.push(self.data[offset + 3]); // A
+        for y in 0..self.height as usize {
+            let row_start = y * self.stride;
+            for x in 0..self.width as usize {
+                let offset = row_start + x * 4;
+                
+                #[cfg(target_os = "macos")]
+                {
+                    // macOS uses ARGB format
+                    rgba.push(self.data[offset + 1]); // R
+                    rgba.push(self.data[offset + 2]); // G
+                    rgba.push(self.data[offset + 3]); // B
+                    rgba.push(self.data[offset]);     // A
+                }
+                
+                #[cfg(not(target_os = "macos"))]
+                {
+                    // Windows/Linux use BGRA format
+                    rgba.push(self.data[offset + 2]); // R
+                    rgba.push(self.data[offset + 1]); // G
+                    rgba.push(self.data[offset]);     // B
+                    rgba.push(self.data[offset + 3]); // A
+                }
+            }
         }
         
         rgba
@@ -191,10 +196,13 @@ fn capture_loop(
         match capturer.frame() {
             Ok(frame) => {
                 let timestamp = start_time.elapsed();
+                // Calculate stride: total bytes / number of rows
+                let stride = frame.len() / height as usize;
                 let screen_frame = ScreenFrame {
                     data: frame.to_vec(),
                     width,
                     height,
+                    stride,
                     timestamp,
                 };
                 
@@ -258,17 +266,54 @@ mod tests {
     
     #[test]
     fn test_screen_frame_conversion() {
+        // Test with tightly-packed data (stride = width * 4)
         let frame = ScreenFrame {
-            data: vec![255, 128, 64, 255], // One BGRA pixel
+            data: vec![255, 128, 64, 255], // One BGRA pixel (on non-macOS) or ARGB (on macOS)
             width: 1,
             height: 1,
+            stride: 4, // 1 pixel * 4 bytes per pixel
             timestamp: Duration::from_secs(0),
         };
         
-        let rgb = frame.to_rgb();
-        assert_eq!(rgb, vec![64, 128, 255]); // RGB
-        
         let rgba = frame.to_rgba();
-        assert_eq!(rgba, vec![64, 128, 255, 255]); // RGBA
+        #[cfg(target_os = "macos")]
+        assert_eq!(rgba, vec![128, 64, 255, 255]); // ARGB -> RGBA
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(rgba, vec![64, 128, 255, 255]); // BGRA -> RGBA
+    }
+    
+    #[test]
+    fn test_screen_frame_with_stride_padding() {
+        // Test with padded data (stride > width * 4)
+        // Simulates 2x2 frame with 16-byte stride (4 bytes padding per row)
+        #[cfg(not(target_os = "macos"))]
+        let frame = ScreenFrame {
+            // Row 0: 2 BGRA pixels + 8 bytes padding
+            // Row 1: 2 BGRA pixels + 8 bytes padding
+            data: vec![
+                // Row 0
+                0, 255, 0, 255,     // Pixel (0,0): BGRA = green
+                255, 0, 0, 255,     // Pixel (1,0): BGRA = blue
+                0, 0, 0, 0, 0, 0, 0, 0, // 8 bytes padding
+                // Row 1
+                0, 0, 255, 255,     // Pixel (0,1): BGRA = red
+                255, 255, 255, 255, // Pixel (1,1): BGRA = white
+                0, 0, 0, 0, 0, 0, 0, 0, // 8 bytes padding
+            ],
+            width: 2,
+            height: 2,
+            stride: 16, // 2 pixels * 4 bytes + 8 bytes padding = 16 bytes
+            timestamp: Duration::from_secs(0),
+        };
+        
+        #[cfg(not(target_os = "macos"))]
+        {
+            let rgba = frame.to_rgba();
+            assert_eq!(rgba.len(), 16); // 2x2 * 4 bytes = 16 bytes (no padding in output)
+            // Check first pixel: green (BGRA 0,255,0,255 -> RGBA 0,255,0,255)
+            assert_eq!(&rgba[0..4], &[0, 255, 0, 255]);
+            // Check second pixel: blue (BGRA 255,0,0,255 -> RGBA 0,0,255,255)
+            assert_eq!(&rgba[4..8], &[0, 0, 255, 255]);
+        }
     }
 }
