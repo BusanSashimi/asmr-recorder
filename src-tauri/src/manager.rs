@@ -95,8 +95,9 @@ impl RecordingManager {
             
             let screen_capture = ScreenCapture::new(screen_config)
                 .map_err(|e| {
-                    if e.contains("permission") || e.contains("other error") {
-                        format!("Screen Recording permission required. Open System Settings → Privacy & Security → Screen Recording and enable access for this app.")
+                    let lower = e.to_lowercase();
+                    if lower.contains("permission") || lower.contains("screen recording") {
+                        "Screen Recording permission required. Open System Settings → Privacy & Security → Screen Recording and enable access for this app.".to_string()
                     } else {
                         format!("Failed to initialize screen capture: {}", e)
                     }

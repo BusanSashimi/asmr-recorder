@@ -1,9 +1,4 @@
-use scrap::{Capturer, Display};
-use std::io::ErrorKind;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use crossbeam_channel::{bounded, Receiver, Sender};
-use parking_lot::Mutex;
+use std::time::Duration;
 use tauri::command;
 
 /// Represents a captured screen frame
@@ -76,187 +71,90 @@ impl Default for ScreenCaptureConfig {
     }
 }
 
-/// Manages continuous screen capture
-pub struct ScreenCapture {
-    config: ScreenCaptureConfig,
-    width: u32,
-    height: u32,
-    running: Arc<Mutex<bool>>,
-    frame_sender: Option<Sender<ScreenFrame>>,
-    frame_receiver: Option<Receiver<ScreenFrame>>,
-}
+#[cfg(target_os = "macos")]
+#[path = "screen_macos.rs"]
+mod screen_macos;
+#[cfg(target_os = "macos")]
+pub use screen_macos::ScreenCapture;
 
-impl ScreenCapture {
-    /// Create a new screen capture instance
-    pub fn new(config: ScreenCaptureConfig) -> Result<Self, String> {
-        let displays = Display::all().map_err(|e| format!("Failed to get displays: {}", e))?;
-        
-        let display = displays
-            .into_iter()
-            .nth(config.display_index)
-            .ok_or_else(|| format!("Display {} not found", config.display_index))?;
-        
-        let width = display.width() as u32;
-        let height = display.height() as u32;
-        
-        // Create a bounded channel for frames (buffer up to 5 frames)
-        let (sender, receiver) = bounded(5);
-        
-        Ok(Self {
-            config,
-            width,
-            height,
-            running: Arc::new(Mutex::new(false)),
-            frame_sender: Some(sender),
-            frame_receiver: Some(receiver),
-        })
-    }
-    
-    /// Get the capture dimensions
-    pub fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-    
-    /// Get a receiver for captured frames
-    pub fn take_receiver(&mut self) -> Option<Receiver<ScreenFrame>> {
-        self.frame_receiver.take()
-    }
-    
-    /// Start capturing frames in a background thread
-    pub fn start(&self) -> Result<(), String> {
-        let mut running = self.running.lock();
-        if *running {
-            return Err("Screen capture already running".to_string());
-        }
-        *running = true;
-        drop(running);
-        
-        let running_clone = self.running.clone();
-        let sender = self.frame_sender.clone()
-            .ok_or("Frame sender not available")?;
-        let fps = self.config.fps;
-        let display_index = self.config.display_index;
-        
-        std::thread::spawn(move || {
-            if let Err(e) = capture_loop(running_clone, sender, fps, display_index) {
-                eprintln!("Screen capture error: {}", e);
-            }
-        });
-        
-        Ok(())
-    }
-    
-    /// Stop capturing
-    pub fn stop(&self) {
-        let mut running = self.running.lock();
-        *running = false;
-    }
-    
-    /// Check if capture is running
-    pub fn is_running(&self) -> bool {
-        *self.running.lock()
-    }
-}
+#[cfg(target_os = "windows")]
+#[path = "screen_windows.rs"]
+mod screen_windows;
+#[cfg(target_os = "windows")]
+pub use screen_windows::ScreenCapture;
 
-/// The main capture loop that runs in a background thread
-fn capture_loop(
-    running: Arc<Mutex<bool>>,
-    sender: Sender<ScreenFrame>,
-    fps: u32,
-    display_index: usize,
-) -> Result<(), String> {
-    let displays = Display::all().map_err(|e| format!("Failed to get displays: {}", e))?;
-    let display = displays
-        .into_iter()
-        .nth(display_index)
-        .ok_or_else(|| format!("Display {} not found", display_index))?;
-    
-    let width = display.width() as u32;
-    let height = display.height() as u32;
-    
-    let mut capturer = Capturer::new(display)
-        .map_err(|e| {
-            let error_msg = format!("{}", e);
-            if error_msg.contains("other error") || error_msg.contains("permission") {
-                format!("Screen recording permission denied. Please grant permission in System Settings → Privacy & Security → Screen Recording")
-            } else {
-                format!("Failed to create capturer: {}", e)
-            }
-        })?;
-    
-    let frame_duration = Duration::from_secs_f64(1.0 / fps as f64);
-    let start_time = Instant::now();
-    
-    println!("Screen capture started: {}x{} @ {}fps", width, height, fps);
-    
-    while *running.lock() {
-        let frame_start = Instant::now();
-        
-        // Attempt to capture a frame
-        match capturer.frame() {
-            Ok(frame) => {
-                let timestamp = start_time.elapsed();
-                // Calculate stride: total bytes / number of rows
-                let stride = frame.len() / height as usize;
-                let screen_frame = ScreenFrame {
-                    data: frame.to_vec(),
-                    width,
-                    height,
-                    stride,
-                    timestamp,
-                };
-                
-                // Send frame (non-blocking, drops if buffer is full)
-                let _ = sender.try_send(screen_frame);
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                // Frame not ready, wait a bit
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            Err(e) => {
-                eprintln!("Capture error: {}", e);
-                // Brief pause before retry
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        
-        // Maintain target frame rate
-        let elapsed = frame_start.elapsed();
-        if elapsed < frame_duration {
-            std::thread::sleep(frame_duration - elapsed);
-        }
-    }
-    
-    println!("Screen capture stopped");
-    Ok(())
-}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[path = "screen_fallback.rs"]
+mod screen_fallback;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub use screen_fallback::ScreenCapture;
 
 /// Legacy Tauri command for backward compatibility
 #[command]
 pub fn start_screen_capture() {
     println!("Starting screen capture...");
-    
-    match Display::primary() {
-        Ok(display) => {
-            println!("Primary display found: {}x{}", display.width(), display.height());
-            println!("Screen capture initialized (use new recording API for actual capture).");
+
+    #[cfg(target_os = "macos")]
+    {
+        match screencapturekit::prelude::SCShareableContent::get() {
+            Ok(content) if !content.displays().is_empty() => {
+                let display = &content.displays()[0];
+                println!("Primary display found: {}x{}", display.width(), display.height());
+                println!("Screen capture initialized (use new recording API for actual capture).");
+            }
+            Ok(_) => println!("No displays found"),
+            Err(e) => println!("Failed to access displays: {}", e),
         }
-        Err(e) => println!("Failed to find primary display: {}", e),
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match windows_capture::monitor::Monitor::primary() {
+            Ok(display) => {
+                println!("Primary display found: {}x{}", display.width(), display.height());
+                println!("Screen capture initialized (use new recording API for actual capture).");
+            }
+            Err(e) => println!("Failed to find primary display: {}", e),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        match scrap::Display::primary() {
+            Ok(display) => {
+                println!("Primary display found: {}x{}", display.width(), display.height());
+                println!("Screen capture initialized (use new recording API for actual capture).");
+            }
+            Err(e) => println!("Failed to find primary display: {}", e),
+        }
     }
 }
 
 /// Check if screen recording permission is granted
 #[command]
 pub fn check_screen_recording_permission() -> Result<bool, String> {
-    match Display::primary() {
-        Ok(display) => {
-            match Capturer::new(display) {
+    #[cfg(target_os = "macos")]
+    {
+        match screencapturekit::prelude::SCShareableContent::get() {
+            Ok(content) => Ok(!content.displays().is_empty()),
+            Err(e) => Err(format!("Failed to access displays: {}", e)),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Ok(windows_capture::monitor::Monitor::primary().is_ok())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        match scrap::Display::primary() {
+            Ok(display) => match scrap::Capturer::new(display) {
                 Ok(_) => Ok(true),
                 Err(_) => Ok(false),
-            }
+            },
+            Err(e) => Err(format!("Failed to access display: {}", e)),
         }
-        Err(e) => Err(format!("Failed to access display: {}", e)),
     }
 }
 

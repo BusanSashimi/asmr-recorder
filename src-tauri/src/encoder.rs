@@ -6,6 +6,9 @@ use crate::compositor::CompositeFrame;
 use crate::audio_mixer::MixedAudioChunk;
 use crate::recording::VideoQuality;
 
+#[cfg(feature = "ffmpeg")]
+use ffmpeg_next::channel_layout::ChannelLayout;
+
 /// Encoder configuration
 pub struct EncoderConfig {
     /// Output file path
@@ -267,64 +270,88 @@ fn encode_loop_ffmpeg(
     let audio_codec = ffmpeg::encoder::find(ffmpeg::codec::Id::AAC)
         .ok_or("AAC encoder not found")?;
     
-    // Add video stream
-    let mut video_stream = output.add_stream(video_codec)
-        .map_err(|e| format!("Failed to add video stream: {}", e))?;
+    let global_header = output
+        .format()
+        .flags()
+        .contains(ffmpeg::format::flag::Flags::GLOBAL_HEADER);
     
-    let video_stream_index = video_stream.index();
-    
-    // Configure video encoder
-    let mut video_encoder_context = ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())
-        .map_err(|e| format!("Failed to create video context: {}", e))?;
-    
-    video_encoder_context.set_width(config.width);
-    video_encoder_context.set_height(config.height);
-    video_encoder_context.set_format(ffmpeg::format::Pixel::YUV420P);
-    video_encoder_context.set_time_base(ffmpeg::Rational(1, config.frame_rate as i32));
-    
-    if output.format().flags().contains(ffmpeg::format::flag::GLOBAL_HEADER) {
-        video_encoder_context.set_flags(ffmpeg::codec::flag::GLOBAL_HEADER);
-    }
-    
-    let mut video_encoder = video_encoder_context.encoder().video()
-        .map_err(|e| format!("Failed to create video encoder: {}", e))?;
-        
-    video_encoder.set_frame_rate(Some(ffmpeg::Rational(config.frame_rate as i32, 1)));
-    video_encoder.set_bit_rate(config.quality.video_bitrate() as usize * 1000);
-    
-    // Set H.264 specific options
-    let mut video_options = ffmpeg::Dictionary::new();
-    video_options.set("preset", "medium");
-    video_options.set("crf", &config.quality.crf().to_string());
-    
-    let video_encoder = video_encoder.open_with(video_options)
-        .map_err(|e| format!("Failed to open video encoder: {}", e))?;
-    
-    video_stream.set_parameters(&video_encoder);
-    
-    // Add audio stream
-    let mut audio_stream = output.add_stream(audio_codec)
-        .map_err(|e| format!("Failed to add audio stream: {}", e))?;
-    
-    let audio_stream_index = audio_stream.index();
-    
-    // Configure audio encoder
-    let mut audio_encoder = ffmpeg::codec::context::Context::from_parameters(audio_stream.parameters())
+    let (mut video_encoder, video_stream_index, video_time_base) = {
+        let mut video_stream = output
+            .add_stream(video_codec)
+            .map_err(|e| format!("Failed to add video stream: {}", e))?;
+
+        let mut video_encoder_context =
+            ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())
+                .map_err(|e| format!("Failed to create video context: {}", e))?;
+
+        video_encoder_context.set_time_base(ffmpeg::Rational(1, config.frame_rate as i32));
+
+        if global_header {
+            video_encoder_context.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
+        }
+
+        let mut video_encoder = video_encoder_context
+            .encoder()
+            .video()
+            .map_err(|e| format!("Failed to create video encoder: {}", e))?;
+
+        video_encoder.set_width(config.width);
+        video_encoder.set_height(config.height);
+        video_encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+        video_encoder.set_frame_rate(Some(ffmpeg::Rational(config.frame_rate as i32, 1)));
+        video_encoder.set_bit_rate(config.quality.video_bitrate() as usize * 1000);
+
+        let mut video_options = ffmpeg::Dictionary::new();
+        video_options.set("preset", "medium");
+        video_options.set("crf", &config.quality.crf().to_string());
+
+        let mut video_encoder = video_encoder
+            .open_with(video_options)
+            .map_err(|e| format!("Failed to open video encoder: {}", e))?;
+
+        let index = video_stream.index();
+        let time_base = video_stream.time_base();
+        video_stream.set_parameters(&video_encoder);
+
+        (video_encoder, index, time_base)
+    };
+
+    let (mut audio_encoder, audio_stream_index, audio_time_base) = {
+        let mut audio_stream = output
+            .add_stream(audio_codec)
+            .map_err(|e| format!("Failed to add audio stream: {}", e))?;
+
+        let mut audio_encoder = ffmpeg::codec::context::Context::from_parameters(
+            audio_stream.parameters(),
+        )
         .map_err(|e| format!("Failed to create audio context: {}", e))?
         .encoder()
         .audio()
         .map_err(|e| format!("Failed to create audio encoder: {}", e))?;
+
+        audio_encoder.set_rate(config.audio_sample_rate as i32);
+        let channel_layout = if config.audio_channels == 1 {
+            ChannelLayout::MONO
+        } else {
+            ChannelLayout::STEREO
+        };
+        audio_encoder.set_channel_layout(channel_layout);
+        audio_encoder
+            .set_format(ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar));
+        audio_encoder.set_time_base(ffmpeg::Rational(1, config.audio_sample_rate as i32));
+        audio_encoder.set_bit_rate(config.quality.audio_bitrate() as usize * 1000);
+
+        let mut audio_encoder = audio_encoder
+            .open()
+            .map_err(|e| format!("Failed to open audio encoder: {}", e))?;
+
+        let index = audio_stream.index();
+        let time_base = audio_stream.time_base();
+        audio_stream.set_parameters(&audio_encoder);
+
+        (audio_encoder, index, time_base)
+    };
     
-    audio_encoder.set_rate(config.audio_sample_rate as i32);
-    audio_encoder.set_channels(config.audio_channels as i32);
-    audio_encoder.set_format(ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar));
-    audio_encoder.set_time_base(ffmpeg::Rational(1, config.audio_sample_rate as i32));
-    audio_encoder.set_bit_rate(config.quality.audio_bitrate() as usize * 1000);
-    
-    let audio_encoder = audio_encoder.open()
-        .map_err(|e| format!("Failed to open audio encoder: {}", e))?;
-    
-    audio_stream.set_parameters(&audio_encoder);
     
     // Write header
     output.write_header()
@@ -369,11 +396,12 @@ fn encode_loop_ffmpeg(
         if let Some(ref receiver) = video_receiver {
             while let Ok(composite_frame) = receiver.try_recv() {
                 // Create a temporary frame from the incoming RGBA data
-                let rgba_frame = ffmpeg::frame::Video::from_data(
-                    composite_frame.data.clone(),
+                let mut rgba_frame = ffmpeg::frame::Video::new(
+                    ffmpeg::format::Pixel::RGBA,
                     config.width,
                     config.height,
                 );
+                fill_rgba_frame(&mut rgba_frame, config.width, config.height, &composite_frame.data);
                 
                 // Convert RGBA to YUV420P
                 if let Err(e) = scaler.run(&rgba_frame, &mut yuv_frame) {
@@ -385,11 +413,11 @@ fn encode_loop_ffmpeg(
                 
                 // Encode video frame
                 if let Err(e) = encode_video_frame(
-                    &video_encoder,
+                    &mut video_encoder,
                     &yuv_frame,
                     &mut output,
                     video_stream_index,
-                    video_stream.time_base(),
+                    video_time_base,
                 ) {
                     eprintln!("Video encode error: {}", e);
                 }
@@ -425,11 +453,11 @@ fn encode_loop_ffmpeg(
                     
                     // Encode audio frame
                     if let Err(e) = encode_audio_frame(
-                        &audio_encoder,
+                        &mut audio_encoder,
                         &audio_frame,
                         &mut output,
                         audio_stream_index,
-                        audio_stream.time_base(),
+                        audio_time_base,
                     ) {
                         eprintln!("Audio encode error: {}", e);
                     }
@@ -444,10 +472,20 @@ fn encode_loop_ffmpeg(
     println!("Flushing encoders...");
     
     // Flush video encoder
-    let _ = flush_encoder(&video_encoder, &mut output, video_stream_index, video_stream.time_base());
+    let _ = flush_video_encoder(
+        &mut video_encoder,
+        &mut output,
+        video_stream_index,
+        video_time_base,
+    );
     
     // Flush audio encoder
-    let _ = flush_encoder(&audio_encoder, &mut output, audio_stream_index, audio_stream.time_base());
+    let _ = flush_audio_encoder(
+        &mut audio_encoder,
+        &mut output,
+        audio_stream_index,
+        audio_time_base,
+    );
     
     // Write trailer
     output.write_trailer()
@@ -489,7 +527,7 @@ fn fill_audio_frame(
 /// Encode a video frame
 #[cfg(feature = "ffmpeg")]
 fn encode_video_frame(
-    encoder: &ffmpeg_next::encoder::video::Video,
+    encoder: &mut ffmpeg_next::encoder::video::Video,
     frame: &ffmpeg_next::frame::Video,
     output: &mut ffmpeg_next::format::context::Output,
     stream_index: usize,
@@ -514,7 +552,7 @@ fn encode_video_frame(
 /// Encode an audio frame
 #[cfg(feature = "ffmpeg")]
 fn encode_audio_frame(
-    encoder: &ffmpeg_next::encoder::audio::Audio,
+    encoder: &mut ffmpeg_next::encoder::audio::Audio,
     frame: &ffmpeg_next::frame::Audio,
     output: &mut ffmpeg_next::format::context::Output,
     stream_index: usize,
@@ -538,8 +576,8 @@ fn encode_audio_frame(
 
 /// Flush remaining packets from encoder
 #[cfg(feature = "ffmpeg")]
-fn flush_encoder<E: ffmpeg_next::encoder::Encoder>(
-    encoder: &E,
+fn flush_video_encoder(
+    encoder: &mut ffmpeg_next::encoder::video::Video,
     output: &mut ffmpeg_next::format::context::Output,
     stream_index: usize,
     time_base: ffmpeg_next::Rational,
@@ -557,4 +595,47 @@ fn flush_encoder<E: ffmpeg_next::encoder::Encoder>(
     }
     
     Ok(())
+}
+
+#[cfg(feature = "ffmpeg")]
+fn flush_audio_encoder(
+    encoder: &mut ffmpeg_next::encoder::audio::Audio,
+    output: &mut ffmpeg_next::format::context::Output,
+    stream_index: usize,
+    time_base: ffmpeg_next::Rational,
+) -> Result<(), String> {
+    let mut packet = ffmpeg_next::Packet::empty();
+
+    encoder
+        .send_eof()
+        .map_err(|e| format!("Failed to send EOF: {}", e))?;
+
+    while encoder.receive_packet(&mut packet).is_ok() {
+        packet.set_stream(stream_index);
+        packet.rescale_ts(encoder.time_base(), time_base);
+
+        let _ = packet.write_interleaved(output);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "ffmpeg")]
+fn fill_rgba_frame(
+    frame: &mut ffmpeg_next::frame::Video,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) {
+    let stride = frame.stride(0) as usize;
+    let row_bytes = (width * 4) as usize;
+    let frame_data = frame.data_mut(0);
+
+    for y in 0..height as usize {
+        let src_start = y * row_bytes;
+        let dst_start = y * stride;
+        let src = &data[src_start..src_start + row_bytes];
+        let dst = &mut frame_data[dst_start..dst_start + row_bytes];
+        dst.copy_from_slice(src);
+    }
 }

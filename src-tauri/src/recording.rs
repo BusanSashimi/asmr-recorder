@@ -6,6 +6,7 @@ use tauri::command;
 use thiserror::Error;
 
 use crate::manager::RecordingManager;
+use crate::system_audio::is_system_audio_available;
 
 /// Position for picture-in-picture webcam overlay
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -216,23 +217,58 @@ impl Default for RecordingState {
 #[command]
 pub fn get_available_devices() -> Result<DeviceList, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
-    
+
     let mut device_list = DeviceList::default();
-    
+
     // Get available screens
-    if let Ok(displays) = scrap::Display::all() {
-        for (i, _display) in displays.iter().enumerate() {
-            device_list.screens.push(DeviceInfo {
-                id: format!("screen_{}", i),
-                name: if i == 0 {
-                    "Primary Display".to_string()
-                } else {
-                    format!("Display {}", i + 1)
-                },
-            });
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(content) = screencapturekit::prelude::SCShareableContent::get() {
+            for (i, display) in content.displays().iter().enumerate() {
+                device_list.screens.push(DeviceInfo {
+                    id: format!("screen_{}", display.display_id()),
+                    name: if i == 0 {
+                        "Primary Display".to_string()
+                    } else {
+                        format!("Display {}", i + 1)
+                    },
+                });
+            }
         }
     }
-    
+
+    #[cfg(target_os = "windows")]
+    {
+        for index in 0..8 {
+            match windows_capture::monitor::Monitor::from_index(index) {
+                Ok(monitor) => {
+                    let name = monitor.name().unwrap_or_else(|| format!("Display {}", index + 1));
+                    device_list.screens.push(DeviceInfo {
+                        id: format!("screen_{}", index),
+                        name,
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Ok(displays) = scrap::Display::all() {
+            for (i, _display) in displays.iter().enumerate() {
+                device_list.screens.push(DeviceInfo {
+                    id: format!("screen_{}", i),
+                    name: if i == 0 {
+                        "Primary Display".to_string()
+                    } else {
+                        format!("Display {}", i + 1)
+                    },
+                });
+            }
+        }
+    }
+
     // Get available microphones
     let host = cpal::default_host();
     if let Ok(devices) = host.input_devices() {
@@ -247,24 +283,7 @@ pub fn get_available_devices() -> Result<DeviceList, String> {
     }
     
     // Check for system audio capability (platform-specific)
-    #[cfg(target_os = "windows")]
-    {
-        // Windows supports WASAPI loopback
-        device_list.has_system_audio = true;
-    }
-    
-    #[cfg(target_os = "macos")]
-    {
-        // macOS requires ScreenCaptureKit or virtual audio device
-        // For now, we'll check if we can access any output device
-        device_list.has_system_audio = host.default_output_device().is_some();
-    }
-    
-    #[cfg(target_os = "linux")]
-    {
-        // Linux can use PulseAudio monitor
-        device_list.has_system_audio = true;
-    }
+    device_list.has_system_audio = is_system_audio_available();
     
     // Note: Webcam enumeration will be added when nokhwa is properly configured
     // For now, we'll try to detect if any webcam is available
