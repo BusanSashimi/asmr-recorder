@@ -32,11 +32,11 @@ impl ScreenFrame {
                 
                 #[cfg(target_os = "macos")]
                 {
-                    // macOS uses ARGB format
-                    rgba.push(self.data[offset + 1]); // R
-                    rgba.push(self.data[offset + 2]); // G
-                    rgba.push(self.data[offset + 3]); // B
-                    rgba.push(self.data[offset]);     // A
+                    // macOS ScreenCaptureKit uses BGRA format
+                    rgba.push(self.data[offset + 2]); // R
+                    rgba.push(self.data[offset + 1]); // G
+                    rgba.push(self.data[offset]);     // B
+                    rgba.push(self.data[offset + 3]); // A
                 }
                 
                 #[cfg(not(target_os = "macos"))]
@@ -174,9 +174,8 @@ mod tests {
         };
         
         let rgba = frame.to_rgba();
-        #[cfg(target_os = "macos")]
-        assert_eq!(rgba, vec![128, 64, 255, 255]); // ARGB -> RGBA
-        #[cfg(not(target_os = "macos"))]
+        // Both macOS and other platforms use BGRA format now
+        // Input BGRA [255, 128, 64, 255] -> Output RGBA [64, 128, 255, 255]
         assert_eq!(rgba, vec![64, 128, 255, 255]); // BGRA -> RGBA
     }
     

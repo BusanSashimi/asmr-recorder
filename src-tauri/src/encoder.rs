@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use crate::compositor::CompositeFrame;
@@ -51,6 +51,7 @@ pub struct Encoder {
     video_receiver: Option<Receiver<CompositeFrame>>,
     audio_receiver: Option<Receiver<MixedAudioChunk>>,
     frames_encoded: Arc<Mutex<u64>>,
+    error_sender: Option<Sender<String>>,
 }
 
 impl Encoder {
@@ -62,6 +63,7 @@ impl Encoder {
             video_receiver: None,
             audio_receiver: None,
             frames_encoded: Arc::new(Mutex::new(0)),
+            error_sender: None,
         }
     }
     
@@ -73,6 +75,11 @@ impl Encoder {
     /// Set the audio chunk receiver
     pub fn set_audio_receiver(&mut self, receiver: Receiver<MixedAudioChunk>) {
         self.audio_receiver = Some(receiver);
+    }
+
+    /// Set the error sender for encoder failures
+    pub fn set_error_sender(&mut self, sender: Sender<String>) {
+        self.error_sender = Some(sender);
     }
     
     /// Get the number of frames encoded
@@ -90,9 +97,11 @@ impl Encoder {
         drop(running);
         
         let running_clone = self.running.clone();
+        let running_control = self.running.clone();
         let frames_encoded = self.frames_encoded.clone();
         let video_receiver = self.video_receiver.clone();
         let audio_receiver = self.audio_receiver.clone();
+        let error_sender = self.error_sender.clone();
         let config = EncoderConfig {
             output_path: self.config.output_path.clone(),
             width: self.config.width,
@@ -106,6 +115,7 @@ impl Encoder {
         std::thread::spawn(move || {
             #[cfg(feature = "ffmpeg")]
             {
+                let output_path = config.output_path.clone();
                 if let Err(e) = encode_loop_ffmpeg(
                     running_clone,
                     frames_encoded,
@@ -114,6 +124,11 @@ impl Encoder {
                     config,
                 ) {
                     eprintln!("Encoder error: {}", e);
+                    if let Some(sender) = error_sender {
+                        let _ = sender.send(e.clone());
+                    }
+                    remove_failed_output(&output_path);
+                    *running_control.lock() = false;
                 }
             }
             
@@ -145,6 +160,14 @@ impl Encoder {
     /// Check if encoder is running
     pub fn is_running(&self) -> bool {
         *self.running.lock()
+    }
+}
+
+fn remove_failed_output(output_path: &str) {
+    if std::fs::metadata(output_path).is_ok() {
+        if let Err(e) = std::fs::remove_file(output_path) {
+            eprintln!("Failed to remove output file after encoder error: {}", e);
+        }
     }
 }
 
@@ -280,9 +303,7 @@ fn encode_loop_ffmpeg(
             .add_stream(video_codec)
             .map_err(|e| format!("Failed to add video stream: {}", e))?;
 
-        let mut video_encoder_context =
-            ffmpeg::codec::context::Context::from_parameters(video_stream.parameters())
-                .map_err(|e| format!("Failed to create video context: {}", e))?;
+        let mut video_encoder_context = ffmpeg::codec::context::Context::new_with_codec(video_codec);
 
         video_encoder_context.set_time_base(ffmpeg::Rational(1, config.frame_rate as i32));
 
@@ -305,13 +326,16 @@ fn encode_loop_ffmpeg(
         video_options.set("preset", "medium");
         video_options.set("crf", &config.quality.crf().to_string());
 
-        let mut video_encoder = video_encoder
+        let video_encoder = video_encoder
             .open_with(video_options)
             .map_err(|e| format!("Failed to open video encoder: {}", e))?;
 
-        let index = video_stream.index();
-        let time_base = video_stream.time_base();
+        // Set stream time_base to match encoder before setting parameters
+        video_stream.set_time_base(video_encoder.time_base());
         video_stream.set_parameters(&video_encoder);
+        let index = video_stream.index();
+        // Use encoder's time_base for consistent timestamp handling
+        let time_base = video_encoder.time_base();
 
         (video_encoder, index, time_base)
     };
@@ -321,13 +345,10 @@ fn encode_loop_ffmpeg(
             .add_stream(audio_codec)
             .map_err(|e| format!("Failed to add audio stream: {}", e))?;
 
-        let mut audio_encoder = ffmpeg::codec::context::Context::from_parameters(
-            audio_stream.parameters(),
-        )
-        .map_err(|e| format!("Failed to create audio context: {}", e))?
-        .encoder()
-        .audio()
-        .map_err(|e| format!("Failed to create audio encoder: {}", e))?;
+        let mut audio_encoder = ffmpeg::codec::context::Context::new_with_codec(audio_codec)
+            .encoder()
+            .audio()
+            .map_err(|e| format!("Failed to create audio encoder: {}", e))?;
 
         audio_encoder.set_rate(config.audio_sample_rate as i32);
         let channel_layout = if config.audio_channels == 1 {
@@ -341,13 +362,16 @@ fn encode_loop_ffmpeg(
         audio_encoder.set_time_base(ffmpeg::Rational(1, config.audio_sample_rate as i32));
         audio_encoder.set_bit_rate(config.quality.audio_bitrate() as usize * 1000);
 
-        let mut audio_encoder = audio_encoder
+        let audio_encoder = audio_encoder
             .open()
             .map_err(|e| format!("Failed to open audio encoder: {}", e))?;
 
-        let index = audio_stream.index();
-        let time_base = audio_stream.time_base();
+        // Set stream time_base to match encoder before setting parameters
+        audio_stream.set_time_base(audio_encoder.time_base());
         audio_stream.set_parameters(&audio_encoder);
+        let index = audio_stream.index();
+        // Use encoder's time_base for consistent timestamp handling
+        let time_base = audio_encoder.time_base();
 
         (audio_encoder, index, time_base)
     };
@@ -357,7 +381,22 @@ fn encode_loop_ffmpeg(
     output.write_header()
         .map_err(|e| format!("Failed to write header: {}", e))?;
     
+    // After write_header, the muxer may have adjusted stream time_bases
+    // Get the actual stream time_bases for proper rescaling
+    let actual_video_time_base = output.stream(video_stream_index)
+        .map(|s| s.time_base())
+        .unwrap_or(video_time_base);
+    let actual_audio_time_base = output.stream(audio_stream_index)
+        .map(|s| s.time_base())
+        .unwrap_or(audio_time_base);
+    
     println!("FFmpeg encoding started");
+    println!("Video time_base: encoder={}/{}, stream={}/{}", 
+        video_time_base.numerator(), video_time_base.denominator(),
+        actual_video_time_base.numerator(), actual_video_time_base.denominator());
+    println!("Audio time_base: encoder={}/{}, stream={}/{}", 
+        audio_time_base.numerator(), audio_time_base.denominator(),
+        actual_audio_time_base.numerator(), actual_audio_time_base.denominator());
     
     let mut frame_count: i64 = 0;
     let mut audio_pts: i64 = 0;
@@ -417,7 +456,7 @@ fn encode_loop_ffmpeg(
                     &yuv_frame,
                     &mut output,
                     video_stream_index,
-                    video_time_base,
+                    actual_video_time_base,
                 ) {
                     eprintln!("Video encode error: {}", e);
                 }
@@ -457,7 +496,7 @@ fn encode_loop_ffmpeg(
                         &audio_frame,
                         &mut output,
                         audio_stream_index,
-                        audio_time_base,
+                        actual_audio_time_base,
                     ) {
                         eprintln!("Audio encode error: {}", e);
                     }
@@ -476,7 +515,7 @@ fn encode_loop_ffmpeg(
         &mut video_encoder,
         &mut output,
         video_stream_index,
-        video_time_base,
+        actual_video_time_base,
     );
     
     // Flush audio encoder
@@ -484,7 +523,7 @@ fn encode_loop_ffmpeg(
         &mut audio_encoder,
         &mut output,
         audio_stream_index,
-        audio_time_base,
+        actual_audio_time_base,
     );
     
     // Write trailer

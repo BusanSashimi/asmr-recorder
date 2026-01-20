@@ -35,6 +35,8 @@ pub struct RecordingManager {
     compositor: Option<VideoCompositor>,
     /// Encoder
     encoder: Option<Encoder>,
+    /// Encoder error receiver
+    encoder_error_receiver: Option<Receiver<String>>,
     /// Compositing thread handle
     compositor_running: Arc<Mutex<bool>>,
 }
@@ -53,12 +55,14 @@ impl RecordingManager {
             audio_mixer: None,
             compositor: None,
             encoder: None,
+            encoder_error_receiver: None,
             compositor_running: Arc::new(Mutex::new(false)),
         }
     }
     
     /// Get the current recording status
-    pub fn status(&self) -> RecordingStatus {
+    pub fn status(&mut self) -> RecordingStatus {
+        self.handle_encoder_errors();
         self.status.lock().clone()
     }
     
@@ -77,9 +81,31 @@ impl RecordingManager {
         // Generate output path if not provided
         let output_path = config.output_path.clone().unwrap_or_else(|| {
             let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-            dirs::video_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(format!("recording_{}.mp4", timestamp))
+            let filename = format!("recording_{}.mp4", timestamp);
+            
+            // In debug/dev mode, save to test-results directory
+            #[cfg(debug_assertions)]
+            {
+                let manifest_dir = env!("CARGO_MANIFEST_DIR");
+                let test_results_dir = PathBuf::from(manifest_dir).join("../test-results");
+                
+                // Create directory if it doesn't exist
+                if let Err(e) = std::fs::create_dir_all(&test_results_dir) {
+                    eprintln!("Failed to create test-results directory: {}", e);
+                    return dirs::video_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(&filename);
+                }
+                
+                return test_results_dir.join(&filename);
+            }
+            
+            #[cfg(not(debug_assertions))]
+            {
+                dirs::video_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(filename)
+            }
         });
         
         // Reset stop signal
@@ -234,6 +260,9 @@ impl RecordingManager {
         
         // Create channel for composite frames
         let (composite_sender, composite_receiver) = bounded::<CompositeFrame>(5);
+
+        // Create channel for encoder errors
+        let (error_sender, error_receiver) = bounded::<String>(1);
         
         // Connect encoder
         if let Some(ref mut encoder) = self.encoder {
@@ -241,7 +270,9 @@ impl RecordingManager {
             if let Some(receiver) = mixed_audio_receiver {
                 encoder.set_audio_receiver(receiver);
             }
+            encoder.set_error_sender(error_sender);
         }
+        self.encoder_error_receiver = Some(error_receiver);
         
         // Start all components
         if let Some(ref capture) = self.screen_capture {
@@ -382,12 +413,34 @@ impl RecordingManager {
         self.audio_mixer = None;
         self.compositor = None;
         self.encoder = None;
+        self.encoder_error_receiver = None;
         
         println!("Recording manager stopped");
         
         output_path
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| "No output path".to_string())
+    }
+}
+
+impl RecordingManager {
+    fn handle_encoder_errors(&mut self) {
+        let error_message = match self.encoder_error_receiver.as_ref() {
+            Some(receiver) => receiver.try_recv().ok(),
+            None => None,
+        };
+
+        if let Some(message) = error_message {
+            self.handle_encoder_failure(message);
+        }
+    }
+
+    fn handle_encoder_failure(&mut self, message: String) {
+        eprintln!("Encoder failure: {}", message);
+        let _ = self.stop();
+        let mut status = self.status.lock();
+        status.error = Some(message);
+        status.is_recording = false;
     }
 }
 

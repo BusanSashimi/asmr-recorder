@@ -341,7 +341,7 @@ pub async fn start_recording(
         Ok(()) => {
             // Update status from manager
             let manager_status = {
-                let manager = state.manager.lock();
+                let mut manager = state.manager.lock();
                 manager.status()
             };
             
@@ -405,6 +405,6 @@ pub async fn stop_recording(
 /// Tauri command: Get current recording status (refreshed from manager)
 #[command]
 pub fn get_recording_status_live(state: tauri::State<'_, Arc<RecordingState>>) -> RecordingStatus {
-    let manager = state.manager.lock();
+    let mut manager = state.manager.lock();
     manager.status()
 }

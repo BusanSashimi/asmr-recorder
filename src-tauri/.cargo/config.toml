@@ -1,0 +1,6 @@
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/lib"]
+
+[env]
+PKG_CONFIG_PATH = "/opt/homebrew/lib/pkgconfig"
+DYLD_LIBRARY_PATH = "/Library/Developer/CommandLineTools/usr/lib/swift-5.5/macosx"
