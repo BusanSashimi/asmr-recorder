@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(PKG_CONFIG_PATH=\"/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH\" cargo check:*)",
+      "Bash(pkill:*)",
+      "Bash(ffprobe:*)",
+      "Bash(PKG_CONFIG_PATH=\"/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH\" cargo build:*)"
+    ]
+  }
+}

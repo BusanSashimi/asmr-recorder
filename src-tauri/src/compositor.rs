@@ -6,7 +6,7 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 /// A composited video frame ready for encoding
 #[derive(Clone)]
 pub struct CompositeFrame {
-    /// RGBA pixel data
+    /// Pixel data (RGBA or BGRA depending on is_bgra flag)
     pub data: Vec<u8>,
     /// Frame width
     pub width: u32,
@@ -14,6 +14,9 @@ pub struct CompositeFrame {
     pub height: u32,
     /// Timestamp
     pub timestamp: std::time::Duration,
+    /// If true, data is in BGRA format (fast path - no color conversion needed)
+    /// If false, data is in RGBA format (webcam overlay was applied)
+    pub is_bgra: bool,
 }
 
 /// Video compositor configuration
@@ -108,21 +111,46 @@ impl VideoCompositor {
         screen_frame: &ScreenFrame,
         webcam_frame: Option<&WebcamFrame>,
     ) -> CompositeFrame {
-        // Start with screen frame converted to RGB
+        // Fast path: if no webcam overlay and dimensions match, skip BGRA→RGBA conversion
+        // This is significantly faster because FFmpeg can handle BGRA→YUV directly
+        if !self.config.include_webcam
+            && screen_frame.width == self.config.output_width
+            && screen_frame.height == self.config.output_height
+        {
+            return self.composite_fast_path(screen_frame);
+        }
+
+        // Slow path: need to use image processing for webcam overlay or scaling
         let mut output = self.prepare_base_frame(screen_frame);
-        
+
         // Add webcam overlay if enabled and frame is available
         if self.config.include_webcam {
             if let Some(webcam) = webcam_frame {
                 self.overlay_webcam(&mut output, webcam);
             }
         }
-        
+
         CompositeFrame {
             data: output.into_raw(),
             width: self.config.output_width,
             height: self.config.output_height,
             timestamp: screen_frame.timestamp,
+            is_bgra: false, // RGBA format after image processing
+        }
+    }
+
+    /// Fast path compositing: directly pass BGRA data to encoder without conversion
+    ///
+    /// This bypasses the expensive BGRA→RGBA conversion when:
+    /// - Webcam overlay is disabled
+    /// - Screen dimensions match output dimensions (no scaling needed)
+    fn composite_fast_path(&self, screen_frame: &ScreenFrame) -> CompositeFrame {
+        CompositeFrame {
+            data: screen_frame.to_packed_bgra(),
+            width: screen_frame.width,
+            height: screen_frame.height,
+            timestamp: screen_frame.timestamp,
+            is_bgra: true, // BGRA format - encoder will use BGRA→YUV conversion
         }
     }
     
@@ -208,7 +236,7 @@ impl VideoCompositor {
     }
     
     /// Create a composite frame from only a webcam frame (no screen)
-    /// 
+    ///
     /// This is useful when only webcam recording is selected
     pub fn composite_webcam_only(&self, webcam_frame: &WebcamFrame) -> CompositeFrame {
         // Convert and scale webcam to fill output
@@ -217,20 +245,22 @@ impl VideoCompositor {
             webcam_frame.width,
             webcam_frame.height,
             rgba_data,
-        ).expect("Failed to create image from webcam frame");
-        
+        )
+        .expect("Failed to create image from webcam frame");
+
         let scaled = image::imageops::resize(
             &webcam_image,
             self.config.output_width,
             self.config.output_height,
             image::imageops::FilterType::Triangle,
         );
-        
+
         CompositeFrame {
             data: scaled.into_raw(),
             width: self.config.output_width,
             height: self.config.output_height,
             timestamp: webcam_frame.timestamp,
+            is_bgra: false, // RGBA format after image processing
         }
     }
     

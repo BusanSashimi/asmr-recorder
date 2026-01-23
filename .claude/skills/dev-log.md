@@ -1,0 +1,57 @@
+# Dev Log Guidelines
+
+## Purpose
+
+Automatically log every operation performed at the user's request to maintain a development history.
+
+## Log File Location
+
+- **Directory**: `ai-dev/dev-logs/`
+- **Filename**: Use the current date in `YYYY-MM-DD.md` format (e.g., `2025-12-19.md`)
+
+## When to Log
+
+After completing any operation requested by the user, append a log entry to the daily log file.
+
+## File Creation
+
+If no log file exists for the current day:
+
+1. Create a new file with the date-based filename
+2. Add a header: `# Dev Log - YYYY-MM-DD`
+3. Add a blank line after the header
+
+## Log Entry Format
+
+Use a numbered list with timestamps in 24-hour format in Seoul, South Korea time:
+
+```markdown
+# Dev Log - 2025-12-19
+
+1. [14:30] Implemented user authentication flow in login component
+2. [15:45] Fixed responsive layout issue in header navigation
+3. [16:20] Added dark mode toggle functionality
+```
+
+## Entry Guidelines
+
+- Keep entries concise and action-focused
+- Start with a verb (Implemented, Fixed, Added, Updated, Removed, Refactored, etc.)
+- Describe what was done, not how
+- Include the affected component, file, or feature when relevant
+- One entry per distinct operation or task
+
+## Examples
+
+Good entries:
+
+- `[10:15] Added dark mode toggle to navigation header`
+- `[11:30] Fixed TypeScript error in ArticleList component`
+- `[14:00] Refactored API utilities for better error handling`
+- `[16:45] Updated Tailwind config for custom color palette`
+
+Avoid:
+
+- Overly detailed technical descriptions
+- Multiple operations in a single entry
+- Vague entries like "Fixed bug" or "Updated code"

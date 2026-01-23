@@ -18,18 +18,18 @@ pub struct ScreenFrame {
 
 impl ScreenFrame {
     /// Convert platform-specific pixel data (BGRA or ARGB) to RGBA format
-    /// 
+    ///
     /// This method properly handles row stride/padding by iterating row-by-row
     /// rather than assuming tightly-packed pixel data.
     pub fn to_rgba(&self) -> Vec<u8> {
         let output_size = (self.width * self.height * 4) as usize;
         let mut rgba = Vec::with_capacity(output_size);
-        
+
         for y in 0..self.height as usize {
             let row_start = y * self.stride;
             for x in 0..self.width as usize {
                 let offset = row_start + x * 4;
-                
+
                 #[cfg(target_os = "macos")]
                 {
                     // macOS ScreenCaptureKit uses BGRA format
@@ -38,7 +38,7 @@ impl ScreenFrame {
                     rgba.push(self.data[offset]);     // B
                     rgba.push(self.data[offset + 3]); // A
                 }
-                
+
                 #[cfg(not(target_os = "macos"))]
                 {
                     // Windows/Linux use BGRA format
@@ -49,8 +49,39 @@ impl ScreenFrame {
                 }
             }
         }
-        
+
         rgba
+    }
+
+    /// Get BGRA data with stride padding removed (fast path - no color conversion)
+    ///
+    /// This is much faster than to_rgba() because it only handles stride alignment
+    /// without doing any per-pixel color channel swapping.
+    pub fn to_packed_bgra(&self) -> Vec<u8> {
+        let row_bytes = (self.width * 4) as usize;
+
+        // Fast path: if stride matches expected row size, data is already tightly packed
+        if self.stride == row_bytes {
+            // Just return a clone of the relevant portion
+            let total_bytes = row_bytes * self.height as usize;
+            return self.data[..total_bytes].to_vec();
+        }
+
+        // Slow path: need to remove padding from each row
+        let output_size = row_bytes * self.height as usize;
+        let mut bgra = Vec::with_capacity(output_size);
+
+        for y in 0..self.height as usize {
+            let row_start = y * self.stride;
+            bgra.extend_from_slice(&self.data[row_start..row_start + row_bytes]);
+        }
+
+        bgra
+    }
+
+    /// Check if data is already tightly packed (stride == width * 4)
+    pub fn is_packed(&self) -> bool {
+        self.stride == (self.width * 4) as usize
     }
 }
 

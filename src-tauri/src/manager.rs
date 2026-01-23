@@ -258,8 +258,9 @@ impl RecordingManager {
         let mixed_audio_receiver = self.audio_mixer.as_mut()
             .and_then(|m| m.take_output_receiver());
         
-        // Create channel for composite frames
-        let (composite_sender, composite_receiver) = bounded::<CompositeFrame>(5);
+        // Create channel for composite frames - larger buffer to absorb encoder delays
+        // At 30fps, 120 frames = 4 seconds of buffer
+        let (composite_sender, composite_receiver) = bounded::<CompositeFrame>(120);
 
         // Create channel for encoder errors
         let (error_sender, error_receiver) = bounded::<String>(1);
@@ -450,6 +451,10 @@ impl Default for RecordingManager {
     }
 }
 
+/// Timeout for sending composite frames to encoder
+/// Shorter timeout keeps the pipeline responsive
+const COMPOSITE_SEND_TIMEOUT: Duration = Duration::from_millis(50);
+
 /// Compositor loop - combines screen and webcam frames
 fn compositor_loop(
     running: Arc<Mutex<bool>>,
@@ -463,10 +468,18 @@ fn compositor_loop(
 ) {
     let start_time = Instant::now();
     let mut frame_count: u64 = 0;
+    let mut skipped_frames: u64 = 0;
     let mut latest_webcam: Option<WebcamFrame> = None;
-    
-    println!("Compositor loop started");
-    
+    let mut last_frame_time = Instant::now();
+    let mut no_frame_warning_printed = false;
+
+    // Adaptive frame rate control
+    // Target: process frames at a rate the encoder can handle
+    let target_frame_interval = Duration::from_millis(33); // ~30fps target
+    let mut last_processed_time = Instant::now();
+
+    println!("Compositor loop started (capture_screen: {})", capture_screen);
+
     while *running.lock() && !*stop_signal.lock() {
         // Get latest webcam frame (non-blocking)
         if let Some(ref receiver) = webcam_receiver {
@@ -474,55 +487,123 @@ fn compositor_loop(
                 latest_webcam = Some(frame);
             }
         }
-        
+
         // Process screen frames
         if capture_screen {
             if let Some(ref receiver) = screen_receiver {
+                let mut received_frame = false;
+                let mut latest_screen_frame: Option<ScreenFrame> = None;
+
+                // Drain all available frames, keeping only the latest
+                // This implements adaptive frame skipping - we always use the most recent frame
                 while let Ok(screen_frame) = receiver.try_recv() {
-                    let composite = compositor.composite(
-                        &screen_frame,
-                        latest_webcam.as_ref(),
-                    );
-                    
-                    if composite_sender.try_send(composite).is_ok() {
+                    if latest_screen_frame.is_some() {
+                        skipped_frames += 1;
+                    }
+                    latest_screen_frame = Some(screen_frame);
+                    received_frame = true;
+                }
+
+                // Process the latest frame if we have one and enough time has passed
+                if let Some(screen_frame) = latest_screen_frame {
+                    last_frame_time = Instant::now();
+                    no_frame_warning_printed = false;
+
+                    // Check if encoder queue has space (adaptive rate control)
+                    let queue_len = composite_sender.len();
+                    let queue_pressure = queue_len as f32 / 120.0; // 0.0 to 1.0
+
+                    // Skip frames if queue is getting full (backpressure)
+                    // This prevents buffer overflow and keeps latency low
+                    let should_skip = queue_pressure > 0.8
+                        && last_processed_time.elapsed() < target_frame_interval * 2;
+
+                    if should_skip {
+                        skipped_frames += 1;
+                    } else {
+                        let composite = compositor.composite(
+                            &screen_frame,
+                            latest_webcam.as_ref(),
+                        );
+
+                        // Use try_send to avoid blocking - if queue is full, skip this frame
+                        match composite_sender.try_send(composite) {
+                            Ok(()) => {
+                                frame_count += 1;
+                                last_processed_time = Instant::now();
+
+                                // Update status periodically
+                                if frame_count % 30 == 0 {
+                                    let mut s = status.lock();
+                                    s.frame_count = frame_count;
+                                    s.duration_ms = start_time.elapsed().as_millis() as u64;
+                                }
+                            }
+                            Err(_) => {
+                                skipped_frames += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Check if we haven't received frames for too long
+                if !received_frame && !no_frame_warning_printed {
+                    let elapsed = last_frame_time.elapsed();
+                    if elapsed > Duration::from_secs(2) {
+                        eprintln!(
+                            "Compositor: no screen frames received for {:.1}s (len: {})",
+                            elapsed.as_secs_f32(),
+                            receiver.len()
+                        );
+                        no_frame_warning_printed = true;
+                    }
+                }
+            }
+        } else if let Some(ref webcam) = latest_webcam {
+            // Webcam only mode - use same adaptive approach
+            let queue_len = composite_sender.len();
+            let should_skip = queue_len > 96; // 80% of 120
+
+            if should_skip {
+                skipped_frames += 1;
+            } else {
+                let composite = compositor.composite_webcam_only(webcam);
+
+                match composite_sender.try_send(composite) {
+                    Ok(()) => {
                         frame_count += 1;
-                        
-                        // Update status periodically
+                        last_processed_time = Instant::now();
+
                         if frame_count % 30 == 0 {
                             let mut s = status.lock();
                             s.frame_count = frame_count;
                             s.duration_ms = start_time.elapsed().as_millis() as u64;
                         }
                     }
+                    Err(_) => {
+                        skipped_frames += 1;
+                    }
                 }
             }
-        } else if let Some(ref webcam) = latest_webcam {
-            // Webcam only mode
-            let composite = compositor.composite_webcam_only(webcam);
-            
-            if composite_sender.try_send(composite).is_ok() {
-                frame_count += 1;
-                
-                if frame_count % 30 == 0 {
-                    let mut s = status.lock();
-                    s.frame_count = frame_count;
-                    s.duration_ms = start_time.elapsed().as_millis() as u64;
-                }
-            }
-            
+
             // Clear webcam frame to wait for next
             latest_webcam = None;
         }
-        
+
         std::thread::sleep(Duration::from_millis(1));
     }
-    
+
     // Final status update
     {
         let mut s = status.lock();
         s.frame_count = frame_count;
         s.duration_ms = start_time.elapsed().as_millis() as u64;
     }
-    
-    println!("Compositor loop stopped: {} frames", frame_count);
+
+    let duration_secs = start_time.elapsed().as_secs_f32();
+    let effective_fps = frame_count as f32 / duration_secs;
+    println!(
+        "Compositor loop stopped: {} frames in {:.1}s ({:.1} fps), {} skipped",
+        frame_count, duration_secs, effective_fps, skipped_frames
+    );
 }

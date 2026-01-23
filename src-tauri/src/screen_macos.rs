@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,6 +9,10 @@ use screencapturekit::prelude::*;
 
 use super::{ScreenCaptureConfig, ScreenFrame};
 
+/// Channel capacity for frame buffer - larger buffer absorbs processing delays
+/// At 30fps, 120 frames = 4 seconds of buffer
+const FRAME_CHANNEL_CAPACITY: usize = 120;
+
 pub struct ScreenCapture {
     config: ScreenCaptureConfig,
     width: u32,
@@ -16,11 +21,33 @@ pub struct ScreenCapture {
     frame_sender: Option<Sender<ScreenFrame>>,
     frame_receiver: Option<Receiver<ScreenFrame>>,
     stream: Arc<Mutex<Option<SCStream>>>,
+    /// Shared frame counter for diagnostics
+    frame_count: Arc<AtomicU64>,
 }
 
 struct FrameHandler {
     sender: Sender<ScreenFrame>,
     start_time: Instant,
+    frame_count: Arc<AtomicU64>,
+    /// Counter for callbacks with no image buffer (for diagnostics)
+    empty_buffer_count: AtomicU64,
+}
+
+impl Drop for FrameHandler {
+    fn drop(&mut self) {
+        let frames = self.frame_count.load(Ordering::Relaxed);
+        let empty = self.empty_buffer_count.load(Ordering::Relaxed);
+        eprintln!(
+            "FrameHandler dropped: {} frames captured, {} empty buffers (ratio: {:.1}%)",
+            frames,
+            empty,
+            if frames + empty > 0 {
+                (empty as f64 / (frames + empty) as f64) * 100.0
+            } else {
+                0.0
+            }
+        );
+    }
 }
 
 impl SCStreamOutputTrait for FrameHandler {
@@ -29,11 +56,18 @@ impl SCStreamOutputTrait for FrameHandler {
             return;
         }
 
+        // Get image buffer - may be None for some callback types (expected behavior)
         let Some(buffer) = sample.image_buffer() else {
+            // Track empty buffers but don't spam logs
+            let empty_count = self.empty_buffer_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if empty_count == 1 || empty_count % 100 == 0 {
+                eprintln!("Screen capture: {} callbacks with no image buffer", empty_count);
+            }
             return;
         };
 
         let Ok(guard) = buffer.lock(CVPixelBufferLockFlags::READ_ONLY) else {
+            eprintln!("Screen capture: failed to lock pixel buffer");
             return;
         };
 
@@ -45,7 +79,32 @@ impl SCStreamOutputTrait for FrameHandler {
             timestamp: self.start_time.elapsed(),
         };
 
-        let _ = self.sender.try_send(frame);
+        // Track frame count
+        let count = self.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Log periodically to show frames are being captured
+        if count % 60 == 0 {
+            let empty = self.empty_buffer_count.load(Ordering::Relaxed);
+            println!(
+                "Screen capture: {} frames captured ({} empty buffers)",
+                count, empty
+            );
+        }
+
+        // CRITICAL: Use try_send to NEVER block the callback
+        // Blocking even briefly causes ScreenCaptureKit's pixel buffer pool to exhaust
+        // which results in image_buffer() returning None (empty buffers)
+        // It's better to drop a frame than to cause buffer pool exhaustion
+        if let Err(e) = self.sender.try_send(frame) {
+            // Only log occasionally to avoid spam
+            if count % 30 == 0 {
+                eprintln!(
+                    "Screen capture: frame {} dropped - channel full (queue len: {})",
+                    count,
+                    self.sender.len()
+                );
+            }
+        }
     }
 }
 
@@ -58,7 +117,7 @@ impl ScreenCapture {
             .get(config.display_index)
             .ok_or_else(|| format!("Display {} not found", config.display_index))?;
 
-        let (sender, receiver) = bounded(5);
+        let (sender, receiver) = bounded(FRAME_CHANNEL_CAPACITY);
 
         Ok(Self {
             config,
@@ -68,6 +127,7 @@ impl ScreenCapture {
             frame_sender: Some(sender),
             frame_receiver: Some(receiver),
             stream: Arc::new(Mutex::new(None)),
+            frame_count: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -110,9 +170,13 @@ impl ScreenCapture {
             .with_width(self.width)
             .with_height(self.height)
             .with_pixel_format(PixelFormat::BGRA)
-            .with_minimum_frame_interval(&frame_interval);
+            .with_minimum_frame_interval(&frame_interval)
+            .with_shows_cursor(true);
 
         let mut stream = SCStream::new(&filter, &stream_config);
+
+        // Reset frame counter
+        self.frame_count.store(0, Ordering::Relaxed);
 
         let handler = FrameHandler {
             sender: self
@@ -120,6 +184,8 @@ impl ScreenCapture {
                 .clone()
                 .ok_or("Frame sender not available")?,
             start_time: Instant::now(),
+            frame_count: self.frame_count.clone(),
+            empty_buffer_count: AtomicU64::new(0),
         };
 
         stream.add_output_handler(handler, SCStreamOutputType::Screen);
@@ -143,11 +209,12 @@ impl ScreenCapture {
         *running = false;
 
         let mut stream_guard = self.stream.lock();
-        if let Some(mut stream) = stream_guard.take() {
+        if let Some(stream) = stream_guard.take() {
             let _ = stream.stop_capture();
         }
 
-        println!("Screen capture stopped");
+        let total_frames = self.frame_count.load(Ordering::Relaxed);
+        println!("Screen capture stopped: {} total frames captured", total_frames);
     }
 
     pub fn is_running(&self) -> bool {

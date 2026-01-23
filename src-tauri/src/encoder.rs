@@ -323,7 +323,10 @@ fn encode_loop_ffmpeg(
         video_encoder.set_bit_rate(config.quality.video_bitrate() as usize * 1000);
 
         let mut video_options = ffmpeg::Dictionary::new();
-        video_options.set("preset", "medium");
+        // Use "ultrafast" preset for real-time encoding - critical for keeping up with capture
+        video_options.set("preset", "ultrafast");
+        // "zerolatency" tune optimizes for real-time recording (disables B-frames, reduces latency)
+        video_options.set("tune", "zerolatency");
         video_options.set("crf", &config.quality.crf().to_string());
 
         let video_encoder = video_encoder
@@ -407,9 +410,22 @@ fn encode_loop_ffmpeg(
         config.width,
         config.height,
     );
-    
-    // Create a scaler for converting from RGBA to YUV420P
-    let mut scaler = Context::get(
+
+    // Create scalers for both BGRA and RGBA input formats
+    // BGRA is used for fast path (screen-only, no webcam overlay)
+    // RGBA is used when webcam overlay is applied
+    let mut bgra_scaler = Context::get(
+        ffmpeg::format::Pixel::BGRA,
+        config.width,
+        config.height,
+        ffmpeg::format::Pixel::YUV420P,
+        config.width,
+        config.height,
+        Flags::BILINEAR,
+    )
+    .map_err(|e| format!("Failed to create BGRA scaler: {}", e))?;
+
+    let mut rgba_scaler = Context::get(
         ffmpeg::format::Pixel::RGBA,
         config.width,
         config.height,
@@ -417,7 +433,8 @@ fn encode_loop_ffmpeg(
         config.width,
         config.height,
         Flags::BILINEAR,
-    ).map_err(|e| format!("Failed to create scaler: {}", e))?;
+    )
+    .map_err(|e| format!("Failed to create RGBA scaler: {}", e))?;
     
     // Create audio frame buffer
     let samples_per_frame = audio_encoder.frame_size() as usize;
@@ -434,22 +451,44 @@ fn encode_loop_ffmpeg(
         // Process video frames
         if let Some(ref receiver) = video_receiver {
             while let Ok(composite_frame) = receiver.try_recv() {
-                // Create a temporary frame from the incoming RGBA data
-                let mut rgba_frame = ffmpeg::frame::Video::new(
-                    ffmpeg::format::Pixel::RGBA,
-                    config.width,
-                    config.height,
-                );
-                fill_rgba_frame(&mut rgba_frame, config.width, config.height, &composite_frame.data);
-                
-                // Convert RGBA to YUV420P
-                if let Err(e) = scaler.run(&rgba_frame, &mut yuv_frame) {
-                    eprintln!("RGBA to YUV conversion error: {}", e);
+                // Choose the right pixel format and scaler based on input format
+                let conversion_result = if composite_frame.is_bgra {
+                    // Fast path: BGRA input (no webcam overlay, screen-only)
+                    let mut bgra_frame = ffmpeg::frame::Video::new(
+                        ffmpeg::format::Pixel::BGRA,
+                        config.width,
+                        config.height,
+                    );
+                    fill_rgba_frame(
+                        &mut bgra_frame,
+                        config.width,
+                        config.height,
+                        &composite_frame.data,
+                    );
+                    bgra_scaler.run(&bgra_frame, &mut yuv_frame)
+                } else {
+                    // Slow path: RGBA input (webcam overlay applied)
+                    let mut rgba_frame = ffmpeg::frame::Video::new(
+                        ffmpeg::format::Pixel::RGBA,
+                        config.width,
+                        config.height,
+                    );
+                    fill_rgba_frame(
+                        &mut rgba_frame,
+                        config.width,
+                        config.height,
+                        &composite_frame.data,
+                    );
+                    rgba_scaler.run(&rgba_frame, &mut yuv_frame)
+                };
+
+                if let Err(e) = conversion_result {
+                    eprintln!("Pixel format conversion error: {}", e);
                     continue;
                 }
-                
+
                 yuv_frame.set_pts(Some(frame_count));
-                
+
                 // Encode video frame
                 if let Err(e) = encode_video_frame(
                     &mut video_encoder,
@@ -460,7 +499,7 @@ fn encode_loop_ffmpeg(
                 ) {
                     eprintln!("Video encode error: {}", e);
                 }
-                
+
                 frame_count += 1;
                 *frames_encoded.lock() = frame_count as u64;
             }
