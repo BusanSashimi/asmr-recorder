@@ -8,7 +8,7 @@ use crate::audio::{AudioChunk, MicrophoneCapture, MicrophoneCaptureConfig};
 use crate::audio_mixer::{AudioMixer, AudioMixerConfig, MixedAudioChunk};
 use crate::compositor::{CompositeFrame, CompositorConfig, VideoCompositor};
 use crate::encoder::{Encoder, EncoderConfig};
-use crate::recording::{PipPosition, RecordingConfig, RecordingStatus, VideoQuality};
+use crate::recording::{OutputResolution, PipPosition, RecordingConfig, RecordingStatus, VideoQuality};
 use crate::screen::{ScreenCapture, ScreenCaptureConfig, ScreenFrame};
 use crate::system_audio::{SystemAudioCapture, SystemAudioCaptureConfig};
 use crate::webcam::{WebcamCapture, WebcamCaptureConfig, WebcamFrame};
@@ -111,9 +111,11 @@ impl RecordingManager {
         // Reset stop signal
         *self.stop_signal.lock() = false;
         
-        // Get screen dimensions for compositor
-        let (screen_width, screen_height) = if config.capture_screen {
-            // Initialize screen capture
+        // Get output dimensions from config (always 16:9)
+        let (output_width, output_height) = config.output_resolution.dimensions();
+        
+        // Initialize screen capture if enabled
+        if config.capture_screen {
             let screen_config = ScreenCaptureConfig {
                 fps: config.frame_rate.unwrap_or(30),
                 display_index: 0,
@@ -129,12 +131,8 @@ impl RecordingManager {
                     }
                 })?;
             
-            let dims = screen_capture.dimensions();
             self.screen_capture = Some(screen_capture);
-            dims
-        } else {
-            (1920, 1080) // Default dimensions
-        };
+        }
         
         // Initialize webcam capture if enabled
         if config.capture_webcam {
@@ -179,10 +177,10 @@ impl RecordingManager {
             }
         }
         
-        // Initialize compositor
+        // Initialize compositor with 16:9 output resolution
         let compositor_config = CompositorConfig {
-            output_width: screen_width,
-            output_height: screen_height,
+            output_width,
+            output_height,
             include_webcam: config.capture_webcam,
             pip_position: config.webcam_position,
             pip_size_percent: config.webcam_size,
@@ -195,11 +193,11 @@ impl RecordingManager {
         let mixer_config = AudioMixerConfig::default();
         self.audio_mixer = Some(AudioMixer::new(mixer_config));
         
-        // Initialize encoder
+        // Initialize encoder with 16:9 output resolution
         let encoder_config = EncoderConfig {
             output_path: output_path.to_string_lossy().to_string(),
-            width: screen_width,
-            height: screen_height,
+            width: output_width,
+            height: output_height,
             frame_rate: config.frame_rate.unwrap_or(30),
             quality: config.video_quality,
             audio_sample_rate: 48000,
@@ -320,10 +318,8 @@ impl RecordingManager {
         let config = self.config.as_ref()
             .ok_or("No recording configuration")?;
         
-        // Get screen dimensions
-        let (width, height) = self.screen_capture.as_ref()
-            .map(|c| c.dimensions())
-            .unwrap_or((1920, 1080));
+        // Use configured 16:9 output resolution
+        let (width, height) = config.output_resolution.dimensions();
         
         let compositor_config = CompositorConfig {
             output_width: width,

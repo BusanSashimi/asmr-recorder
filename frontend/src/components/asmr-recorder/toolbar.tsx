@@ -36,8 +36,8 @@ import {
 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { useRecordingContext } from "@/contexts/recording-context";
-import { formatDuration } from "@/types/recording";
-import type { PipPosition, VideoQuality } from "@/types/recording";
+import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
+import type { PipPosition, VideoQuality, OutputResolution } from "@/types/recording";
 
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -312,6 +312,28 @@ export function Toolbar() {
                       <SelectItem value="24">24 fps</SelectItem>
                       <SelectItem value="30">30 fps</SelectItem>
                       <SelectItem value="60">60 fps</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">
+                    Output Resolution (16:9)
+                  </Label>
+                  <Select
+                    value={config.outputResolution || "hd1080"}
+                    onValueChange={(value: OutputResolution) =>
+                      updateConfig({ outputResolution: value })
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(OUTPUT_RESOLUTIONS).map(([key, { label }]) => (
+                        <SelectItem key={key} value={key}>
+                          {label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>

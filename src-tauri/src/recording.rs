@@ -59,6 +59,43 @@ impl VideoQuality {
     }
 }
 
+/// Output resolution preset for 16:9 aspect ratio
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputResolution {
+    /// 1280x720 (720p)
+    Hd720,
+    /// 1920x1080 (1080p)
+    #[default]
+    Hd1080,
+    /// 2560x1440 (1440p/2K)
+    Qhd1440,
+    /// 3840x2160 (4K)
+    Uhd4k,
+}
+
+impl OutputResolution {
+    /// Get the width and height for this resolution
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            OutputResolution::Hd720 => (1280, 720),
+            OutputResolution::Hd1080 => (1920, 1080),
+            OutputResolution::Qhd1440 => (2560, 1440),
+            OutputResolution::Uhd4k => (3840, 2160),
+        }
+    }
+    
+    /// Get just the width
+    pub fn width(&self) -> u32 {
+        self.dimensions().0
+    }
+    
+    /// Get just the height
+    pub fn height(&self) -> u32 {
+        self.dimensions().1
+    }
+}
+
 /// Configuration for a recording session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +126,10 @@ pub struct RecordingConfig {
     
     /// Target frame rate (default 30)
     pub frame_rate: Option<u32>,
+    
+    /// Output resolution (default 1080p, always 16:9)
+    #[serde(default)]
+    pub output_resolution: OutputResolution,
 }
 
 impl Default for RecordingConfig {
@@ -103,6 +144,7 @@ impl Default for RecordingConfig {
             output_path: None,
             video_quality: VideoQuality::default(),
             frame_rate: Some(30),
+            output_resolution: OutputResolution::default(),
         }
     }
 }

@@ -4,6 +4,16 @@ export type PipPosition = "top-left" | "top-right" | "bottom-left" | "bottom-rig
 
 export type VideoQuality = "low" | "medium" | "high";
 
+// Output resolution presets (all 16:9 aspect ratio)
+export type OutputResolution = "hd720" | "hd1080" | "qhd1440" | "uhd4k";
+
+export const OUTPUT_RESOLUTIONS: Record<OutputResolution, { width: number; height: number; label: string }> = {
+  hd720: { width: 1280, height: 720, label: "720p (1280×720)" },
+  hd1080: { width: 1920, height: 1080, label: "1080p (1920×1080)" },
+  qhd1440: { width: 2560, height: 1440, label: "1440p (2560×1440)" },
+  uhd4k: { width: 3840, height: 2160, label: "4K (3840×2160)" },
+};
+
 export interface RecordingConfig {
   captureScreen: boolean;
   captureWebcam: boolean;
@@ -14,6 +24,7 @@ export interface RecordingConfig {
   outputPath?: string;
   videoQuality: VideoQuality;
   frameRate?: number;
+  outputResolution: OutputResolution;
 }
 
 export interface RecordingStatus {
@@ -45,6 +56,7 @@ export const defaultRecordingConfig: RecordingConfig = {
   captureSystemAudio: false,
   videoQuality: "medium",
   frameRate: 30,
+  outputResolution: "hd1080",
 };
 
 export function formatDuration(ms: number): string {
@@ -57,3 +69,40 @@ export function formatDuration(ms: number): string {
     .toString()
     .padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 }
+
+// Section-based recording types
+export type RecordingSource = "screen" | "camera" | null;
+
+export interface ScreenRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SectionConfig {
+  source: RecordingSource;
+  deviceId?: string;      // Camera device ID if source is "camera"
+  deviceName?: string;    // Human-readable device name
+  region?: ScreenRegion;  // Screen region if source is "screen"
+  stream?: MediaStream;   // Live MediaStream for preview
+}
+
+export interface SectionState {
+  sections: [SectionConfig, SectionConfig, SectionConfig, SectionConfig];
+  activeSectionIndex: number | null;
+}
+
+export const defaultSectionConfig: SectionConfig = {
+  source: null,
+};
+
+export const defaultSectionState: SectionState = {
+  sections: [
+    { source: null },
+    { source: null },
+    { source: null },
+    { source: null },
+  ],
+  activeSectionIndex: null,
+};

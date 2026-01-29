@@ -1,7 +1,14 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { defaultRecordingConfig } from "@/types/recording";
-import type { RecordingConfig, RecordingStatus, DeviceList } from "@/types/recording";
+import { defaultRecordingConfig, defaultSectionState } from "@/types/recording";
+import type { 
+  RecordingConfig, 
+  RecordingStatus, 
+  DeviceList, 
+  SectionConfig, 
+  SectionState,
+  RecordingSource 
+} from "@/types/recording";
 
 interface RecordingContextValue {
   config: RecordingConfig;
@@ -12,6 +19,15 @@ interface RecordingContextValue {
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<string>;
   fetchDevices: () => Promise<void>;
+  // Section-based recording
+  sectionState: SectionState;
+  setActiveSectionIndex: (index: number | null) => void;
+  setSectionSource: (index: number, source: RecordingSource, deviceId?: string, deviceName?: string) => void;
+  setSectionStream: (index: number, stream: MediaStream | undefined) => void;
+  clearSection: (index: number) => void;
+  clearAllSections: () => void;
+  browserDevices: MediaDeviceInfo[];
+  fetchBrowserDevices: () => Promise<void>;
 }
 
 const RecordingContext = createContext<RecordingContextValue | null>(null);
@@ -26,8 +42,12 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [devices, setDevices] = useState<DeviceList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const statusPollRef = useRef<number | null>(null);
+  
+  // Section-based recording state
+  const [sectionState, setSectionState] = useState<SectionState>(defaultSectionState);
+  const [browserDevices, setBrowserDevices] = useState<MediaDeviceInfo[]>([]);
 
-  // Fetch available devices
+  // Fetch available devices from Tauri backend
   const fetchDevices = useCallback(async () => {
     try {
       const deviceList = await invoke<DeviceList>("get_available_devices");
@@ -38,10 +58,28 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Fetch browser media devices (cameras, microphones)
+  const fetchBrowserDevices = useCallback(async () => {
+    try {
+      // Request permission first to get full device info
+      await navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+        stream.getTracks().forEach(track => track.stop());
+      }).catch(() => {
+        // Permission denied, continue with limited device info
+      });
+      
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setBrowserDevices(devices);
+    } catch (err) {
+      console.error("Failed to fetch browser devices:", err);
+    }
+  }, []);
+
   // Fetch devices on mount
   useEffect(() => {
     fetchDevices();
-  }, [fetchDevices]);
+    fetchBrowserDevices();
+  }, [fetchDevices, fetchBrowserDevices]);
 
   // Poll recording status when recording
   useEffect(() => {
@@ -106,6 +144,91 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     setConfig((prev) => ({ ...prev, ...updates }));
   }, []);
 
+  // Section management methods
+  const setActiveSectionIndex = useCallback((index: number | null) => {
+    setSectionState((prev) => ({
+      ...prev,
+      activeSectionIndex: index,
+    }));
+  }, []);
+
+  const setSectionSource = useCallback((
+    index: number, 
+    source: RecordingSource, 
+    deviceId?: string, 
+    deviceName?: string
+  ) => {
+    setSectionState((prev) => {
+      const newSections = [...prev.sections] as SectionState["sections"];
+      newSections[index] = {
+        ...newSections[index],
+        source,
+        deviceId,
+        deviceName,
+      };
+      return {
+        ...prev,
+        sections: newSections,
+      };
+    });
+  }, []);
+
+  const setSectionStream = useCallback((index: number, stream: MediaStream | undefined) => {
+    setSectionState((prev) => {
+      const newSections = [...prev.sections] as SectionState["sections"];
+      // Stop previous stream if exists
+      if (newSections[index].stream) {
+        newSections[index].stream?.getTracks().forEach(track => track.stop());
+      }
+      newSections[index] = {
+        ...newSections[index],
+        stream,
+      };
+      return {
+        ...prev,
+        sections: newSections,
+      };
+    });
+  }, []);
+
+  const clearSection = useCallback((index: number) => {
+    setSectionState((prev) => {
+      const newSections = [...prev.sections] as SectionState["sections"];
+      // Stop stream if exists
+      if (newSections[index].stream) {
+        newSections[index].stream?.getTracks().forEach(track => track.stop());
+      }
+      newSections[index] = { source: null };
+      return {
+        ...prev,
+        sections: newSections,
+      };
+    });
+  }, []);
+
+  const clearAllSections = useCallback(() => {
+    setSectionState((prev) => {
+      // Stop all streams
+      prev.sections.forEach(section => {
+        if (section.stream) {
+          section.stream.getTracks().forEach(track => track.stop());
+        }
+      });
+      return defaultSectionState;
+    });
+  }, []);
+
+  // Cleanup streams on unmount
+  useEffect(() => {
+    return () => {
+      sectionState.sections.forEach(section => {
+        if (section.stream) {
+          section.stream.getTracks().forEach(track => track.stop());
+        }
+      });
+    };
+  }, []);
+
   const value: RecordingContextValue = {
     config,
     updateConfig,
@@ -115,6 +238,15 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     startRecording,
     stopRecording,
     fetchDevices,
+    // Section-based recording
+    sectionState,
+    setActiveSectionIndex,
+    setSectionSource,
+    setSectionStream,
+    clearSection,
+    clearAllSections,
+    browserDevices,
+    fetchBrowserDevices,
   };
 
   return (
