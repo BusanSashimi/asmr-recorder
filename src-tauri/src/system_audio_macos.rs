@@ -128,7 +128,7 @@ impl SystemAudioCapture {
         *running = false;
 
         let mut stream_guard = self.stream.lock();
-        if let Some(mut stream) = stream_guard.take() {
+        if let Some(stream) = stream_guard.take() {
             let _ = stream.stop_capture();
         }
 

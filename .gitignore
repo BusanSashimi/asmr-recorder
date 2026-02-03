@@ -15,6 +15,5 @@ src-tauri/target/
 .idea/
 
 # AI development and reference files
-ai-dev/
 reference/
 test-results/

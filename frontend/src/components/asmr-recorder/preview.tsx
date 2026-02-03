@@ -1,24 +1,36 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { 
-  Play, 
-  Pause, 
-  Volume2, 
-  VolumeX, 
-  Plus, 
-  Monitor, 
-  Camera, 
+import {
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Plus,
+  Monitor,
+  Camera,
   X,
   Circle,
-  Crop
+  Crop,
 } from "lucide-react";
 import { RecordModal } from "./record-modal";
 import { CameraSelectModal } from "./camera-select-modal";
-import { RegionSelector } from "./region-selector";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { toast } from "@/hooks/use-toast";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ScreenRegion } from "@/types/recording";
+
+interface MonitorInfo {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scaleFactor: number;
+  isPrimary: boolean;
+}
 
 interface PreviewProps {
   isRecording?: boolean;
@@ -43,34 +55,51 @@ interface SectionSourceVideo {
   [key: number]: HTMLVideoElement | null;
 }
 
-export function Preview({
-  isRecording = false,
-}: PreviewProps) {
+export function Preview({ isRecording = false }: PreviewProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [showRecordModal, setShowRecordModal] = useState(false);
   const [showCameraModal, setShowCameraModal] = useState(false);
-  const [showRegionSelector, setShowRegionSelector] = useState(false);
   const [selectedSection, setSelectedSection] = useState<number>(0);
   const [pendingStream, setPendingStream] = useState<MediaStream | null>(null);
-  const [screenDimensions, setScreenDimensions] = useState({ width: 1920, height: 1080 });
-  
+  const [screenDimensions, setScreenDimensions] = useState({
+    width: 1920,
+    height: 1080,
+  });
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
+
   const videoRefs = useRef<SectionVideoRef>({});
   const canvasRefs = useRef<SectionCanvasRef>({});
   const sectionRegions = useRef<SectionRegion>({});
   const sourceVideos = useRef<SectionSourceVideo>({});
   const animationFrames = useRef<{ [key: number]: number }>({});
-  
-  const { 
-    sectionState, 
-    setSectionSource, 
-    setSectionStream, 
+  const regionListenersRef = useRef<UnlistenFn[]>([]);
+
+  const {
+    sectionState,
+    setSectionSource,
+    setSectionStream,
     clearSection,
     setActiveSectionIndex,
   } = useRecordingContext();
 
   // Check if any section has content
-  const hasContent = sectionState.sections.some(section => section.source !== null);
+  const hasContent = sectionState.sections.some(
+    (section) => section.source !== null
+  );
+
+  // Fetch monitors on mount
+  useEffect(() => {
+    const fetchMonitors = async () => {
+      try {
+        const monitorList = await invoke<MonitorInfo[]>("get_monitors");
+        setMonitors(monitorList);
+      } catch (err) {
+        console.error("Failed to fetch monitors:", err);
+      }
+    };
+    fetchMonitors();
+  }, []);
 
   // Timeline playback listener
   useEffect(() => {
@@ -79,7 +108,10 @@ export function Preview({
       setIsPlaying(timelinePlaying);
     };
 
-    window.addEventListener("timelinePlayback", handleTimelinePlayback as EventListener);
+    window.addEventListener(
+      "timelinePlayback",
+      handleTimelinePlayback as EventListener
+    );
 
     return () => {
       window.removeEventListener(
@@ -116,31 +148,40 @@ export function Preview({
   };
 
   // Start canvas rendering loop for cropped video
-  const startCanvasRendering = useCallback((sectionIndex: number, video: HTMLVideoElement, region: ScreenRegion) => {
-    const canvas = canvasRefs.current[sectionIndex];
-    if (!canvas) return;
+  const startCanvasRendering = useCallback(
+    (sectionIndex: number, video: HTMLVideoElement, region: ScreenRegion) => {
+      const canvas = canvasRefs.current[sectionIndex];
+      if (!canvas) return;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
 
-    // Set canvas size to match region
-    canvas.width = region.width;
-    canvas.height = region.height;
+      // Set canvas size to match region
+      canvas.width = region.width;
+      canvas.height = region.height;
 
-    const render = () => {
-      if (video.readyState >= video.HAVE_CURRENT_DATA) {
-        // Draw the cropped region of the video
-        ctx.drawImage(
-          video,
-          region.x, region.y, region.width, region.height, // Source rectangle
-          0, 0, region.width, region.height // Destination rectangle
-        );
-      }
-      animationFrames.current[sectionIndex] = requestAnimationFrame(render);
-    };
+      const render = () => {
+        if (video.readyState >= video.HAVE_CURRENT_DATA) {
+          // Draw the cropped region of the video
+          ctx.drawImage(
+            video,
+            region.x,
+            region.y,
+            region.width,
+            region.height, // Source rectangle
+            0,
+            0,
+            region.width,
+            region.height // Destination rectangle
+          );
+        }
+        animationFrames.current[sectionIndex] = requestAnimationFrame(render);
+      };
 
-    render();
-  }, []);
+      render();
+    },
+    []
+  );
 
   // Stop canvas rendering for a section
   const stopCanvasRendering = useCallback((sectionIndex: number) => {
@@ -154,6 +195,86 @@ export function Preview({
     }
   }, []);
 
+  // Handle region confirmation from overlay window
+  const handleRegionConfirm = useCallback(
+    (region: ScreenRegion) => {
+      if (!pendingStream) return;
+
+      const sectionIndex = selectedSection;
+
+      // Store the region for this section
+      sectionRegions.current[sectionIndex] = region;
+
+      // Create a hidden video element for the source stream
+      const sourceVideo = document.createElement("video");
+      sourceVideo.srcObject = pendingStream;
+      sourceVideo.autoplay = true;
+      sourceVideo.muted = true;
+      sourceVideo.playsInline = true;
+      sourceVideos.current[sectionIndex] = sourceVideo;
+
+      // Handle stream ending
+      pendingStream.getVideoTracks()[0].onended = () => {
+        stopCanvasRendering(sectionIndex);
+        sectionRegions.current[sectionIndex] = null;
+        clearSection(sectionIndex);
+        toast({
+          title: "Screen sharing stopped",
+          description: `Section ${sectionIndex + 1} cleared`,
+        });
+      };
+
+      // Wait for video to be ready, then start rendering
+      sourceVideo.onloadedmetadata = () => {
+        sourceVideo.play();
+        startCanvasRendering(sectionIndex, sourceVideo, region);
+      };
+
+      const regionLabel =
+        region.width === screenDimensions.width &&
+        region.height === screenDimensions.height
+          ? "Full Screen"
+          : `Region (${region.width}×${region.height})`;
+
+      setSectionSource(sectionIndex, "screen", undefined, regionLabel);
+      setSectionStream(sectionIndex, pendingStream);
+
+      toast({
+        title: "Screen capture started",
+        description: `Recording ${regionLabel.toLowerCase()} to section ${
+          sectionIndex + 1
+        }`,
+      });
+
+      setPendingStream(null);
+      // Clean up event listeners
+      regionListenersRef.current.forEach(unlisten => unlisten());
+      regionListenersRef.current = [];
+    },
+    [
+      pendingStream,
+      selectedSection,
+      screenDimensions,
+      setSectionSource,
+      setSectionStream,
+      clearSection,
+      startCanvasRendering,
+      stopCanvasRendering,
+    ]
+  );
+
+  // Handle region cancel from overlay window
+  const handleRegionCancel = useCallback(() => {
+    if (pendingStream) {
+      pendingStream.getTracks().forEach((track) => track.stop());
+      setPendingStream(null);
+    }
+    // Clean up event listeners
+    regionListenersRef.current.forEach(unlisten => unlisten());
+    regionListenersRef.current = [];
+  }, [pendingStream]);
+
+  // Start screen capture with region selection overlay
   const startScreenCapture = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -168,11 +289,61 @@ export function Preview({
       const settings = videoTrack.getSettings();
       const width = settings.width || 1920;
       const height = settings.height || 1080;
-      
+
       setScreenDimensions({ width, height });
       setPendingStream(stream);
-      setShowRegionSelector(true);
+
+      // Find the best matching monitor based on resolution
+      // This is a heuristic - the monitor whose size matches the captured stream
+      let targetMonitor = monitors.find(m => m.isPrimary) || monitors[0];
       
+      // Try to find a monitor that matches the captured resolution
+      const matchingMonitor = monitors.find(
+        m => m.width === width && m.height === height
+      );
+      if (matchingMonitor) {
+        targetMonitor = matchingMonitor;
+      }
+
+      if (!targetMonitor) {
+        // Fallback: use primary monitor dimensions
+        targetMonitor = {
+          id: "primary",
+          name: "Primary Display",
+          x: 0,
+          y: 0,
+          width: width,
+          height: height,
+          scaleFactor: 1,
+          isPrimary: true,
+        };
+      }
+
+      // Clean up any existing listeners
+      regionListenersRef.current.forEach(unlisten => unlisten());
+      regionListenersRef.current = [];
+
+      // Set up event listeners for region selection
+      const unlistenSelected = await listen<ScreenRegion>("region-selected", (event) => {
+        const region = event.payload;
+        handleRegionConfirm(region);
+      });
+
+      const unlistenCancelled = await listen("region-cancelled", () => {
+        handleRegionCancel();
+      });
+
+      regionListenersRef.current = [unlistenSelected, unlistenCancelled];
+
+      // Open the region selector overlay on the target monitor
+      await invoke("open_region_selector", {
+        monitorX: targetMonitor.x,
+        monitorY: targetMonitor.y,
+        monitorWidth: targetMonitor.width,
+        monitorHeight: targetMonitor.height,
+        scaleFactor: targetMonitor.scaleFactor,
+      });
+
     } catch (err) {
       if ((err as Error).name === "NotAllowedError") {
         toast({
@@ -189,66 +360,13 @@ export function Preview({
         });
       }
     }
-  }, []);
+  }, [monitors, handleRegionConfirm, handleRegionCancel]);
 
-  const handleRegionConfirm = useCallback((region: ScreenRegion) => {
-    if (!pendingStream) return;
-
-    const sectionIndex = selectedSection;
-    
-    // Store the region for this section
-    sectionRegions.current[sectionIndex] = region;
-
-    // Create a hidden video element for the source stream
-    const sourceVideo = document.createElement("video");
-    sourceVideo.srcObject = pendingStream;
-    sourceVideo.autoplay = true;
-    sourceVideo.muted = true;
-    sourceVideo.playsInline = true;
-    sourceVideos.current[sectionIndex] = sourceVideo;
-
-    // Handle stream ending
-    pendingStream.getVideoTracks()[0].onended = () => {
-      stopCanvasRendering(sectionIndex);
-      sectionRegions.current[sectionIndex] = null;
-      clearSection(sectionIndex);
-      toast({
-        title: "Screen sharing stopped",
-        description: `Section ${sectionIndex + 1} cleared`,
-      });
-    };
-
-    // Wait for video to be ready, then start rendering
-    sourceVideo.onloadedmetadata = () => {
-      sourceVideo.play();
-      startCanvasRendering(sectionIndex, sourceVideo, region);
-    };
-
-    const regionLabel = region.width === screenDimensions.width && region.height === screenDimensions.height
-      ? "Full Screen"
-      : `Region (${region.width}×${region.height})`;
-
-    setSectionSource(sectionIndex, "screen", undefined, regionLabel);
-    setSectionStream(sectionIndex, pendingStream);
-    
-    toast({
-      title: "Screen capture started",
-      description: `Recording ${regionLabel.toLowerCase()} to section ${sectionIndex + 1}`,
-    });
-
-    setShowRegionSelector(false);
-    setPendingStream(null);
-  }, [pendingStream, selectedSection, screenDimensions, setSectionSource, setSectionStream, clearSection, startCanvasRendering, stopCanvasRendering]);
-
-  const handleRegionCancel = useCallback(() => {
-    if (pendingStream) {
-      pendingStream.getTracks().forEach(track => track.stop());
-      setPendingStream(null);
-    }
-    setShowRegionSelector(false);
-  }, [pendingStream]);
-
-  const handleCameraSelect = (deviceId: string, deviceName: string, stream: MediaStream) => {
+  const handleCameraSelect = (
+    deviceId: string,
+    deviceName: string,
+    stream: MediaStream
+  ) => {
     // Handle stream ending
     stream.getVideoTracks()[0].onended = () => {
       clearSection(selectedSection);
@@ -260,7 +378,7 @@ export function Preview({
 
     setSectionSource(selectedSection, "camera", deviceId, deviceName);
     setSectionStream(selectedSection, stream);
-    
+
     toast({
       title: "Camera connected",
       description: `${deviceName} assigned to section ${selectedSection + 1}`,
@@ -271,7 +389,7 @@ export function Preview({
     // Stop canvas rendering if it was a screen capture with region
     stopCanvasRendering(index);
     sectionRegions.current[index] = null;
-    
+
     clearSection(index);
     toast({
       title: "Section cleared",
@@ -283,9 +401,11 @@ export function Preview({
   useEffect(() => {
     return () => {
       // Stop all canvas rendering
-      Object.keys(animationFrames.current).forEach(key => {
+      Object.keys(animationFrames.current).forEach((key) => {
         cancelAnimationFrame(animationFrames.current[parseInt(key)]);
       });
+      // Clean up event listeners
+      regionListenersRef.current.forEach(unlisten => unlisten());
     };
   }, []);
 
@@ -303,7 +423,7 @@ export function Preview({
   const toggleMute = () => {
     setIsMuted(!isMuted);
     // Apply mute to all video elements
-    Object.values(videoRefs.current).forEach(videoEl => {
+    Object.values(videoRefs.current).forEach((videoEl) => {
       if (videoEl) {
         videoEl.muted = !isMuted;
       }
@@ -312,8 +432,9 @@ export function Preview({
 
   const renderSectionContent = (index: number) => {
     const section = sectionState.sections[index];
-    const hasRegion = section.source === "screen" && sectionRegions.current[index];
-    
+    const hasRegion =
+      section.source === "screen" && sectionRegions.current[index];
+
     if (section.source === null) {
       // Empty section - show add button
       return (
@@ -327,7 +448,9 @@ export function Preview({
           <span className="text-white/60 group-hover:text-white/80 text-sm font-medium">
             Section {index + 1}
           </span>
-          <span className="text-white/40 text-xs mt-1">Click to add source</span>
+          <span className="text-white/40 text-xs mt-1">
+            Click to add source
+          </span>
         </button>
       );
     }
@@ -338,22 +461,26 @@ export function Preview({
         {/* Canvas for cropped screen capture */}
         {hasRegion && (
           <canvas
-            ref={(el) => { canvasRefs.current[index] = el; }}
+            ref={(el) => {
+              canvasRefs.current[index] = el;
+            }}
             className="w-full h-full object-contain bg-black"
           />
         )}
-        
+
         {/* Video feed (for camera or full-screen capture without region) */}
         {!hasRegion && (
           <video
-            ref={(el) => { videoRefs.current[index] = el; }}
+            ref={(el) => {
+              videoRefs.current[index] = el;
+            }}
             autoPlay
             playsInline
             muted={isMuted}
             className="w-full h-full object-cover bg-black"
           />
         )}
-        
+
         {/* Recording indicator overlay */}
         {isRecording && (
           <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 rounded-full px-2 py-1">
@@ -361,7 +488,7 @@ export function Preview({
             <span className="text-white text-xs font-medium">REC</span>
           </div>
         )}
-        
+
         {/* Source indicator with region icon */}
         <div className="absolute bottom-2 left-2 flex items-center gap-1.5 bg-black/60 rounded-full px-2 py-1">
           {section.source === "screen" ? (
@@ -374,19 +501,21 @@ export function Preview({
             <Camera className="h-3 w-3 text-white" />
           )}
           <span className="text-white text-xs truncate max-w-[100px]">
-            {section.deviceName || (section.source === "screen" ? "Screen" : "Camera")}
+            {section.deviceName ||
+              (section.source === "screen" ? "Screen" : "Camera")}
           </span>
         </div>
-        
+
         {/* Region indicator badge */}
         {hasRegion && sectionRegions.current[index] && (
           <div className="absolute top-2 right-2 flex items-center gap-1 bg-red-500/80 rounded px-1.5 py-0.5">
             <span className="text-white text-[10px] font-mono">
-              {sectionRegions.current[index]!.width}×{sectionRegions.current[index]!.height}
+              {sectionRegions.current[index]!.width}×
+              {sectionRegions.current[index]!.height}
             </span>
           </div>
         )}
-        
+
         {/* Hover controls */}
         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
           <Button
@@ -409,7 +538,7 @@ export function Preview({
             <X className="h-4 w-4" />
           </Button>
         </div>
-        
+
         {/* Red border when recording this section */}
         {isRecording && (
           <div className="absolute inset-0 border-2 border-red-500 rounded-lg pointer-events-none" />
@@ -421,13 +550,16 @@ export function Preview({
   return (
     <div className="flex-1 p-4 bg-muted/20 flex items-center justify-center">
       {/* 16:9 aspect ratio container */}
-      <div className="w-full max-w-full" style={{ maxHeight: 'calc(100% - 1rem)' }}>
-        <Card 
+      <div
+        className="w-full max-w-full"
+        style={{ maxHeight: "calc(100% - 1rem)" }}
+      >
+        <Card
           className="relative bg-black/90 overflow-hidden mx-auto"
-          style={{ 
-            aspectRatio: '16 / 9',
-            maxWidth: '100%',
-            maxHeight: '100%',
+          style={{
+            aspectRatio: "16 / 9",
+            maxWidth: "100%",
+            maxHeight: "100%",
           }}
         >
           {/* 4-Section Grid - maintains 16:9 within the card */}
@@ -439,57 +571,57 @@ export function Preview({
             ))}
           </div>
 
-        {/* Recording overlay - shows when recording is active */}
-        {isRecording && (
-          <div className="absolute top-4 right-4 flex items-center gap-2 bg-red-500/90 rounded-full px-3 py-1.5 z-10">
-            <Circle className="h-3 w-3 fill-white text-white animate-pulse" />
-            <span className="text-white text-sm font-medium">Recording</span>
+          {/* Recording overlay - shows when recording is active */}
+          {isRecording && (
+            <div className="absolute top-4 right-4 flex items-center gap-2 bg-red-500/90 rounded-full px-3 py-1.5 z-10">
+              <Circle className="h-3 w-3 fill-white text-white animate-pulse" />
+              <span className="text-white text-sm font-medium">Recording</span>
+            </div>
+          )}
+
+          {/* Controls overlay */}
+          <div className="absolute bottom-4 left-4 right-4 flex items-center gap-3 z-10">
+            <Button
+              size="sm"
+              variant="secondary"
+              className="bg-black/50 hover:bg-black/70 text-white border-white/20"
+              onClick={togglePlay}
+              disabled={!hasContent || isRecording}
+            >
+              {isPlaying ? (
+                <Pause className="h-4 w-4" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+            </Button>
+
+            <div className="flex-1 h-1 bg-white/20 rounded-full">
+              <div
+                className={`h-full bg-white rounded-full transition-all ${
+                  isRecording ? "w-full animate-pulse" : "w-0"
+                }`}
+              />
+            </div>
+
+            <Button
+              size="sm"
+              variant="secondary"
+              className="bg-black/50 hover:bg-black/70 text-white border-white/20"
+              onClick={toggleMute}
+              disabled={!hasContent}
+            >
+              {isMuted ? (
+                <VolumeX className="h-4 w-4" />
+              ) : (
+                <Volume2 className="h-4 w-4" />
+              )}
+            </Button>
+
+            <span className="text-white text-sm font-mono">
+              {isRecording ? "Recording" : hasContent ? "Ready" : "No Sources"}
+            </span>
           </div>
-        )}
-
-        {/* Controls overlay */}
-        <div className="absolute bottom-4 left-4 right-4 flex items-center gap-3 z-10">
-          <Button
-            size="sm"
-            variant="secondary"
-            className="bg-black/50 hover:bg-black/70 text-white border-white/20"
-            onClick={togglePlay}
-            disabled={!hasContent || isRecording}
-          >
-            {isPlaying ? (
-              <Pause className="h-4 w-4" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-          </Button>
-
-          <div className="flex-1 h-1 bg-white/20 rounded-full">
-            <div
-              className={`h-full bg-white rounded-full transition-all ${
-                isRecording ? "w-full animate-pulse" : "w-0"
-              }`}
-            />
-          </div>
-
-          <Button
-            size="sm"
-            variant="secondary"
-            className="bg-black/50 hover:bg-black/70 text-white border-white/20"
-            onClick={toggleMute}
-            disabled={!hasContent}
-          >
-            {isMuted ? (
-              <VolumeX className="h-4 w-4" />
-            ) : (
-              <Volume2 className="h-4 w-4" />
-            )}
-          </Button>
-
-          <span className="text-white text-sm font-mono">
-            {isRecording ? "Recording" : hasContent ? "Ready" : "No Sources"}
-          </span>
-        </div>
-      </Card>
+        </Card>
       </div>
 
       {/* Record Modal - Screen/Camera selection */}
@@ -498,7 +630,9 @@ export function Preview({
         onOpenChange={setShowRecordModal}
         onSelectOption={handleRecordOption}
         sectionIndex={selectedSection}
-        hasExistingSource={sectionState.sections[selectedSection]?.source !== null}
+        hasExistingSource={
+          sectionState.sections[selectedSection]?.source !== null
+        }
         onClear={() => handleClearSection(selectedSection)}
       />
 
@@ -510,14 +644,7 @@ export function Preview({
         sectionIndex={selectedSection}
       />
 
-      {/* Region Selector Overlay */}
-      <RegionSelector
-        open={showRegionSelector}
-        onClose={handleRegionCancel}
-        onConfirm={handleRegionConfirm}
-        screenWidth={screenDimensions.width}
-        screenHeight={screenDimensions.height}
-      />
+      {/* Region Selector is now opened as a separate Tauri window via invoke("open_region_selector") */}
     </div>
   );
 }

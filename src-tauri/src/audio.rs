@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, Stream};
+use cpal::SampleFormat;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Receiver, Sender};

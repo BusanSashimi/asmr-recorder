@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "--directory",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "ASMR Recorder",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "transparent": false
       }
     ],
     "security": {
@@ -34,7 +38,8 @@
     "macOS": {
       "entitlements": "entitlements.plist",
       "frameworks": [],
-      "minimumSystemVersion": "10.13"
+      "minimumSystemVersion": "10.13",
+      "exceptionDomain": null
     }
   }
 }
