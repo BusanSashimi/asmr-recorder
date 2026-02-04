@@ -5,7 +5,11 @@
       "Bash(PKG_CONFIG_PATH=\"/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH\" cargo check:*)",
       "Bash(pkill:*)",
       "Bash(ffprobe:*)",
-      "Bash(PKG_CONFIG_PATH=\"/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH\" cargo build:*)"
+      "Bash(PKG_CONFIG_PATH=\"/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH\" cargo build:*)",
+      "Bash(head:*)",
+      "Bash(npm run build:*)",
+      "Bash(timeout 10 npm run dev:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

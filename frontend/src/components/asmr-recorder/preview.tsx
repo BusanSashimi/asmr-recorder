@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,22 +15,11 @@ import {
 } from "lucide-react";
 import { RecordModal } from "./record-modal";
 import { CameraSelectModal } from "./camera-select-modal";
+import { RegionSelector } from "./region-selector";
+import { RecordingCanvas } from "./recording-canvas";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { toast } from "@/hooks/use-toast";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ScreenRegion } from "@/types/recording";
-
-interface MonitorInfo {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  scaleFactor: number;
-  isPrimary: boolean;
-}
 
 interface PreviewProps {
   isRecording?: boolean;
@@ -60,20 +49,19 @@ export function Preview({ isRecording = false }: PreviewProps) {
   const [isMuted, setIsMuted] = useState(false);
   const [showRecordModal, setShowRecordModal] = useState(false);
   const [showCameraModal, setShowCameraModal] = useState(false);
+  const [showRegionSelector, setShowRegionSelector] = useState(false);
   const [selectedSection, setSelectedSection] = useState<number>(0);
   const [pendingStream, setPendingStream] = useState<MediaStream | null>(null);
   const [screenDimensions, setScreenDimensions] = useState({
     width: 1920,
     height: 1080,
   });
-  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
 
   const videoRefs = useRef<SectionVideoRef>({});
   const canvasRefs = useRef<SectionCanvasRef>({});
   const sectionRegions = useRef<SectionRegion>({});
   const sourceVideos = useRef<SectionSourceVideo>({});
   const animationFrames = useRef<{ [key: number]: number }>({});
-  const regionListenersRef = useRef<UnlistenFn[]>([]);
 
   const {
     sectionState,
@@ -81,25 +69,62 @@ export function Preview({ isRecording = false }: PreviewProps) {
     setSectionStream,
     clearSection,
     setActiveSectionIndex,
+    externalConfig,
+    isExternalRecording,
   } = useRecordingContext();
+
+  // Build section sources for RecordingCanvas
+  type SectionSourceType = {
+    type: "video" | "canvas" | null;
+    element: HTMLVideoElement | HTMLCanvasElement | null;
+    region?: ScreenRegion | null;
+  };
+
+  // Build section sources - recalculates when sections change
+  // Note: We use a getter function pattern so RecordingCanvas always gets fresh refs
+  const getSectionSources = useCallback((): [SectionSourceType, SectionSourceType, SectionSourceType, SectionSourceType] => {
+    const sources = sectionState.sections.map((section, index): SectionSourceType => {
+      const hasRegion = section.source === "screen" && sectionRegions.current[index];
+      
+      if (section.source === null) {
+        return { type: null, element: null };
+      }
+      
+      if (hasRegion) {
+        // Use canvas for cropped screen capture
+        return {
+          type: "canvas",
+          element: canvasRefs.current[index] || null,
+          region: sectionRegions.current[index],
+        };
+      } else {
+        // Use video for camera or full-screen capture
+        return {
+          type: "video",
+          element: videoRefs.current[index] || null,
+        };
+      }
+    });
+    return sources as [SectionSourceType, SectionSourceType, SectionSourceType, SectionSourceType];
+  }, [sectionState.sections]);
+
+  // Memoized initial value for RecordingCanvas
+  const sectionSources = useMemo(() => getSectionSources(), [getSectionSources]);
+
+  // Handle frame capture errors
+  const handleFrameError = useCallback((error: string) => {
+    console.error("Frame capture error:", error);
+    toast({
+      title: "Recording error",
+      description: error,
+      variant: "destructive",
+    });
+  }, []);
 
   // Check if any section has content
   const hasContent = sectionState.sections.some(
     (section) => section.source !== null
   );
-
-  // Fetch monitors on mount
-  useEffect(() => {
-    const fetchMonitors = async () => {
-      try {
-        const monitorList = await invoke<MonitorInfo[]>("get_monitors");
-        setMonitors(monitorList);
-      } catch (err) {
-        console.error("Failed to fetch monitors:", err);
-      }
-    };
-    fetchMonitors();
-  }, []);
 
   // Timeline playback listener
   useEffect(() => {
@@ -195,7 +220,42 @@ export function Preview({ isRecording = false }: PreviewProps) {
     }
   }, []);
 
-  // Handle region confirmation from overlay window
+  const startScreenCapture = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          displaySurface: "monitor",
+        },
+        audio: false,
+      });
+
+      // Get video dimensions from the track
+      const videoTrack = stream.getVideoTracks()[0];
+      const settings = videoTrack.getSettings();
+      const width = settings.width || 1920;
+      const height = settings.height || 1080;
+
+      setScreenDimensions({ width, height });
+      setPendingStream(stream);
+      setShowRegionSelector(true);
+    } catch (err) {
+      if ((err as Error).name === "NotAllowedError") {
+        toast({
+          title: "Permission denied",
+          description: "Screen capture was cancelled or denied",
+          variant: "destructive",
+        });
+      } else {
+        console.error("Screen capture error:", err);
+        toast({
+          title: "Screen capture failed",
+          description: String(err),
+          variant: "destructive",
+        });
+      }
+    }
+  }, []);
+
   const handleRegionConfirm = useCallback(
     (region: ScreenRegion) => {
       if (!pendingStream) return;
@@ -246,10 +306,8 @@ export function Preview({ isRecording = false }: PreviewProps) {
         }`,
       });
 
+      setShowRegionSelector(false);
       setPendingStream(null);
-      // Clean up event listeners
-      regionListenersRef.current.forEach(unlisten => unlisten());
-      regionListenersRef.current = [];
     },
     [
       pendingStream,
@@ -263,104 +321,13 @@ export function Preview({ isRecording = false }: PreviewProps) {
     ]
   );
 
-  // Handle region cancel from overlay window
   const handleRegionCancel = useCallback(() => {
     if (pendingStream) {
       pendingStream.getTracks().forEach((track) => track.stop());
       setPendingStream(null);
     }
-    // Clean up event listeners
-    regionListenersRef.current.forEach(unlisten => unlisten());
-    regionListenersRef.current = [];
+    setShowRegionSelector(false);
   }, [pendingStream]);
-
-  // Start screen capture with region selection overlay
-  const startScreenCapture = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          displaySurface: "monitor",
-        },
-        audio: false,
-      });
-
-      // Get video dimensions from the track
-      const videoTrack = stream.getVideoTracks()[0];
-      const settings = videoTrack.getSettings();
-      const width = settings.width || 1920;
-      const height = settings.height || 1080;
-
-      setScreenDimensions({ width, height });
-      setPendingStream(stream);
-
-      // Find the best matching monitor based on resolution
-      // This is a heuristic - the monitor whose size matches the captured stream
-      let targetMonitor = monitors.find(m => m.isPrimary) || monitors[0];
-      
-      // Try to find a monitor that matches the captured resolution
-      const matchingMonitor = monitors.find(
-        m => m.width === width && m.height === height
-      );
-      if (matchingMonitor) {
-        targetMonitor = matchingMonitor;
-      }
-
-      if (!targetMonitor) {
-        // Fallback: use primary monitor dimensions
-        targetMonitor = {
-          id: "primary",
-          name: "Primary Display",
-          x: 0,
-          y: 0,
-          width: width,
-          height: height,
-          scaleFactor: 1,
-          isPrimary: true,
-        };
-      }
-
-      // Clean up any existing listeners
-      regionListenersRef.current.forEach(unlisten => unlisten());
-      regionListenersRef.current = [];
-
-      // Set up event listeners for region selection
-      const unlistenSelected = await listen<ScreenRegion>("region-selected", (event) => {
-        const region = event.payload;
-        handleRegionConfirm(region);
-      });
-
-      const unlistenCancelled = await listen("region-cancelled", () => {
-        handleRegionCancel();
-      });
-
-      regionListenersRef.current = [unlistenSelected, unlistenCancelled];
-
-      // Open the region selector overlay on the target monitor
-      await invoke("open_region_selector", {
-        monitorX: targetMonitor.x,
-        monitorY: targetMonitor.y,
-        monitorWidth: targetMonitor.width,
-        monitorHeight: targetMonitor.height,
-        scaleFactor: targetMonitor.scaleFactor,
-      });
-
-    } catch (err) {
-      if ((err as Error).name === "NotAllowedError") {
-        toast({
-          title: "Permission denied",
-          description: "Screen capture was cancelled or denied",
-          variant: "destructive",
-        });
-      } else {
-        console.error("Screen capture error:", err);
-        toast({
-          title: "Screen capture failed",
-          description: String(err),
-          variant: "destructive",
-        });
-      }
-    }
-  }, [monitors, handleRegionConfirm, handleRegionCancel]);
 
   const handleCameraSelect = (
     deviceId: string,
@@ -389,6 +356,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
     // Stop canvas rendering if it was a screen capture with region
     stopCanvasRendering(index);
     sectionRegions.current[index] = null;
+    videoRefs.current[index] = null;
 
     clearSection(index);
     toast({
@@ -404,8 +372,6 @@ export function Preview({ isRecording = false }: PreviewProps) {
       Object.keys(animationFrames.current).forEach((key) => {
         cancelAnimationFrame(animationFrames.current[parseInt(key)]);
       });
-      // Clean up event listeners
-      regionListenersRef.current.forEach(unlisten => unlisten());
     };
   }, []);
 
@@ -571,13 +537,18 @@ export function Preview({ isRecording = false }: PreviewProps) {
             ))}
           </div>
 
-          {/* Recording overlay - shows when recording is active */}
-          {isRecording && (
-            <div className="absolute top-4 right-4 flex items-center gap-2 bg-red-500/90 rounded-full px-3 py-1.5 z-10">
+        {/* Recording overlay - shows when recording is active */}
+        {isRecording && (
+          <div className="absolute top-4 right-4 flex flex-col items-end gap-2 z-10">
+            <div className="flex items-center gap-2 bg-red-500/90 rounded-full px-3 py-1.5">
               <Circle className="h-3 w-3 fill-white text-white animate-pulse" />
               <span className="text-white text-sm font-medium">Recording</span>
             </div>
-          )}
+            <div className="bg-black/80 rounded px-2 py-1 text-xs text-white/80">
+              Low res preview recording (performance limitation)
+            </div>
+          </div>
+        )}
 
           {/* Controls overlay */}
           <div className="absolute bottom-4 left-4 right-4 flex items-center gap-3 z-10">
@@ -644,7 +615,26 @@ export function Preview({ isRecording = false }: PreviewProps) {
         sectionIndex={selectedSection}
       />
 
-      {/* Region Selector is now opened as a separate Tauri window via invoke("open_region_selector") */}
+      {/* Region Selector Overlay */}
+      <RegionSelector
+        open={showRegionSelector}
+        onClose={handleRegionCancel}
+        onConfirm={handleRegionConfirm}
+        screenWidth={screenDimensions.width}
+        screenHeight={screenDimensions.height}
+        stream={pendingStream}
+      />
+
+      {/* Recording Canvas - composites sections and sends frames to Tauri */}
+      <RecordingCanvas
+        outputWidth={externalConfig.outputWidth}
+        outputHeight={externalConfig.outputHeight}
+        frameRate={externalConfig.frameRate || 30}
+        isRecording={isExternalRecording}
+        onFrameError={handleFrameError}
+        sectionSources={sectionSources}
+        getSectionSources={getSectionSources}
+      />
     </div>
   );
 }

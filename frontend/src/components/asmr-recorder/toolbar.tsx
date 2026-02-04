@@ -18,10 +18,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Slider } from "@/components/ui/slider";
 import {
   Mic,
-  Monitor,
   Download,
   Play,
   Pause,
@@ -32,39 +30,46 @@ import {
   Settings,
   Video,
   Volume2,
-  Camera,
 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
-import type { PipPosition, VideoQuality, OutputResolution } from "@/types/recording";
+import type { VideoQuality, OutputResolution } from "@/types/recording";
 
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const {
-    config,
-    updateConfig,
     status,
     devices,
-    startRecording,
-    stopRecording,
+    sectionState,
+    // External frame recording (for 4-section preview)
+    externalConfig,
+    updateExternalConfig,
+    isExternalRecording,
+    startExternalRecording,
+    stopExternalRecording,
   } = useRecordingContext();
+
+  // Check if any section has content (for enabling record button)
+  const hasContent = sectionState.sections.some(
+    (section) => section.source !== null
+  );
 
   const handleRecord = async () => {
     try {
-      if (status.isRecording) {
-        const outputPath = await stopRecording();
+      if (status.isRecording || isExternalRecording) {
+        const outputPath = await stopExternalRecording();
         toast({
           title: "Recording stopped",
           description: `Saved to: ${outputPath}`,
         });
       } else {
-        await startRecording();
+        await startExternalRecording();
         toast({
           title: "Recording started",
-          description: "Recording in progress...",
+          description: "Recording preview layout...",
         });
       }
     } catch (err) {
@@ -86,9 +91,9 @@ export function Toolbar() {
   };
 
   const handleStop = async () => {
-    if (status.isRecording) {
+    if (status.isRecording || isExternalRecording) {
       try {
-        await stopRecording();
+        await stopExternalRecording();
         toast({
           title: "Recording stopped",
           description: "Recording has been saved",
@@ -123,8 +128,10 @@ export function Toolbar() {
     }
   };
 
-  // Check if any video source is enabled
-  const hasVideoSource = config.captureScreen || config.captureWebcam;
+  // Count active sections for display
+  const activeSectionCount = sectionState.sections.filter(
+    (section) => section.source !== null
+  ).length;
 
   return (
     <div className="h-14 border-b border-border bg-card px-4 flex items-center gap-2">
@@ -135,7 +142,7 @@ export function Toolbar() {
             variant="outline"
             size="sm"
             className="gap-2 bg-transparent"
-            disabled={status.isRecording}
+            disabled={status.isRecording || isExternalRecording}
           >
             <Settings className="h-4 w-4" />
             Settings
@@ -145,82 +152,25 @@ export function Toolbar() {
           <DialogHeader>
             <DialogTitle>Recording Settings</DialogTitle>
             <DialogDescription>
-              Configure your video and audio sources
+              Configure audio and quality for preview recording
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-6 py-4">
-            {/* Video Sources */}
+            {/* Video Info */}
             <div className="space-y-4">
               <h4 className="text-sm font-medium flex items-center gap-2">
                 <Video className="h-4 w-4" />
                 Video Sources
               </h4>
-              <div className="space-y-3 pl-6">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="screen-capture" className="flex items-center gap-2">
-                    <Monitor className="h-4 w-4" />
-                    Screen Capture
-                  </Label>
-                  <Switch
-                    id="screen-capture"
-                    checked={config.captureScreen}
-                    onCheckedChange={(checked) =>
-                      updateConfig({ captureScreen: checked })
-                    }
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="webcam-capture" className="flex items-center gap-2">
-                    <Camera className="h-4 w-4" />
-                    Webcam (PiP)
-                  </Label>
-                  <Switch
-                    id="webcam-capture"
-                    checked={config.captureWebcam}
-                    onCheckedChange={(checked) =>
-                      updateConfig({ captureWebcam: checked })
-                    }
-                  />
-                </div>
-                {config.captureWebcam && (
-                  <div className="space-y-3 pl-6 border-l-2 border-muted">
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">
-                        PiP Position
-                      </Label>
-                      <Select
-                        value={config.webcamPosition}
-                        onValueChange={(value: PipPosition) =>
-                          updateConfig({ webcamPosition: value })
-                        }
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="top-left">Top Left</SelectItem>
-                          <SelectItem value="top-right">Top Right</SelectItem>
-                          <SelectItem value="bottom-left">Bottom Left</SelectItem>
-                          <SelectItem value="bottom-right">Bottom Right</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">
-                        PiP Size: {config.webcamSize}%
-                      </Label>
-                      <Slider
-                        value={[config.webcamSize]}
-                        onValueChange={([value]) =>
-                          updateConfig({ webcamSize: value })
-                        }
-                        min={10}
-                        max={50}
-                        step={5}
-                      />
-                    </div>
-                  </div>
-                )}
+              <div className="pl-6 text-sm text-muted-foreground">
+                <p>
+                  {activeSectionCount > 0
+                    ? `${activeSectionCount} section${activeSectionCount > 1 ? "s" : ""} active`
+                    : "No sections configured"}
+                </p>
+                <p className="text-xs mt-1">
+                  Add sources by clicking the sections in the preview
+                </p>
               </div>
             </div>
 
@@ -238,9 +188,9 @@ export function Toolbar() {
                   </Label>
                   <Switch
                     id="mic-capture"
-                    checked={config.captureMic}
+                    checked={externalConfig.captureMic}
                     onCheckedChange={(checked) =>
-                      updateConfig({ captureMic: checked })
+                      updateExternalConfig({ captureMic: checked })
                     }
                   />
                 </div>
@@ -261,9 +211,9 @@ export function Toolbar() {
                   </Label>
                   <Switch
                     id="system-audio"
-                    checked={config.captureSystemAudio}
+                    checked={externalConfig.captureSystemAudio}
                     onCheckedChange={(checked) =>
-                      updateConfig({ captureSystemAudio: checked })
+                      updateExternalConfig({ captureSystemAudio: checked })
                     }
                     disabled={!devices?.hasSystemAudio}
                   />
@@ -280,9 +230,9 @@ export function Toolbar() {
                     Video Quality
                   </Label>
                   <Select
-                    value={config.videoQuality}
+                    value={externalConfig.videoQuality}
                     onValueChange={(value: VideoQuality) =>
-                      updateConfig({ videoQuality: value })
+                      updateExternalConfig({ videoQuality: value })
                     }
                   >
                     <SelectTrigger className="w-full">
@@ -300,9 +250,9 @@ export function Toolbar() {
                     Frame Rate
                   </Label>
                   <Select
-                    value={String(config.frameRate || 30)}
+                    value={String(externalConfig.frameRate || 30)}
                     onValueChange={(value) =>
-                      updateConfig({ frameRate: parseInt(value) })
+                      updateExternalConfig({ frameRate: parseInt(value) })
                     }
                   >
                     <SelectTrigger className="w-full">
@@ -320,9 +270,9 @@ export function Toolbar() {
                     Output Resolution (16:9)
                   </Label>
                   <Select
-                    value={config.outputResolution || "hd1080"}
+                    value={externalConfig.outputResolution || "hd1080"}
                     onValueChange={(value: OutputResolution) =>
-                      updateConfig({ outputResolution: value })
+                      updateExternalConfig({ outputResolution: value })
                     }
                   >
                     <SelectTrigger className="w-full">
@@ -340,9 +290,9 @@ export function Toolbar() {
               </div>
             </div>
 
-            {!hasVideoSource && (
+            {!hasContent && (
               <p className="text-sm text-destructive">
-                Please enable at least one video source
+                Add at least one source to a section before recording
               </p>
             )}
           </div>
@@ -351,13 +301,13 @@ export function Toolbar() {
 
       {/* Main Record Button */}
       <Button
-        variant={status.isRecording ? "destructive" : "default"}
+        variant={status.isRecording || isExternalRecording ? "destructive" : "default"}
         size="sm"
         className="gap-2"
         onClick={handleRecord}
-        disabled={!hasVideoSource}
+        disabled={!hasContent}
       >
-        {status.isRecording ? (
+        {status.isRecording || isExternalRecording ? (
           <>
             <Square className="h-4 w-4" />
             Stop
@@ -374,22 +324,19 @@ export function Toolbar() {
 
       {/* Source Indicators */}
       <div className="flex items-center gap-1 text-xs text-muted-foreground">
-        {config.captureScreen && (
+        {/* Section count indicator */}
+        {activeSectionCount > 0 && (
           <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
-            <Monitor className="h-3 w-3" />
+            <Video className="h-3 w-3" />
+            <span>{activeSectionCount}</span>
           </div>
         )}
-        {config.captureWebcam && (
-          <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
-            <Camera className="h-3 w-3" />
-          </div>
-        )}
-        {config.captureMic && (
+        {externalConfig.captureMic && (
           <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
             <Mic className="h-3 w-3" />
           </div>
         )}
-        {config.captureSystemAudio && (
+        {externalConfig.captureSystemAudio && (
           <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
             <Volume2 className="h-3 w-3" />
           </div>
@@ -407,7 +354,7 @@ export function Toolbar() {
         variant="outline"
         size="sm"
         onClick={handlePlay}
-        disabled={status.isRecording}
+        disabled={status.isRecording || isExternalRecording}
         className="bg-transparent"
       >
         {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
@@ -418,7 +365,7 @@ export function Toolbar() {
         size="sm"
         className="bg-transparent"
         onClick={handleStop}
-        disabled={!isPlaying && !status.isRecording}
+        disabled={!isPlaying && !status.isRecording && !isExternalRecording}
       >
         <Square className="h-4 w-4" />
       </Button>
@@ -443,7 +390,7 @@ export function Toolbar() {
       <div className="flex-1" />
 
       {/* Recording Indicator */}
-      {status.isRecording && (
+      {(status.isRecording || isExternalRecording) && (
         <div className="flex items-center gap-2 text-destructive">
           <Circle className="h-3 w-3 fill-current animate-pulse" />
           <span className="text-sm font-medium">Recording</span>
@@ -454,7 +401,7 @@ export function Toolbar() {
       )}
 
       {/* Timeline Position */}
-      {!status.isRecording && (
+      {!status.isRecording && !isExternalRecording && (
         <div className="text-sm text-muted-foreground font-mono">
           {formatDuration(status.durationMs)} / {formatDuration(status.durationMs)}
         </div>

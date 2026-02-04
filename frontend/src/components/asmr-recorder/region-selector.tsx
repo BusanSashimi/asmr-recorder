@@ -8,6 +8,7 @@ interface RegionSelectorProps {
   onConfirm: (region: { x: number; y: number; width: number; height: number }) => void;
   screenWidth?: number;
   screenHeight?: number;
+  stream?: MediaStream | null;
 }
 
 interface Region {
@@ -26,6 +27,7 @@ export function RegionSelector({
   onConfirm,
   screenWidth = 1920,
   screenHeight = 1080,
+  stream,
 }: RegionSelectorProps) {
   // Default to center region
   const [region, setRegion] = useState<Region>({
@@ -40,6 +42,7 @@ export function RegionSelector({
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [regionStart, setRegionStart] = useState<Region>(region);
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   // Scale factor for preview (fit screen in viewport)
   const scale = Math.min(
@@ -164,6 +167,13 @@ export function RegionSelector({
     return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
   }, []);
 
+  // Set video srcObject when stream changes
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
   const handleConfirm = () => {
     onConfirm({
       x: Math.round(region.x),
@@ -202,18 +212,31 @@ export function RegionSelector({
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
         >
-          {/* Screen background pattern */}
-          <div className="absolute inset-0 bg-gradient-to-br from-gray-800 to-gray-900">
-            <div className="absolute inset-0 opacity-10">
-              <div className="w-full h-full" style={{
-                backgroundImage: `
-                  linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
-                  linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)
-                `,
-                backgroundSize: `${50 * scale}px ${50 * scale}px`,
-              }} />
+          {/* Video feed background */}
+          {stream && (
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 w-full h-full object-contain bg-black"
+            />
+          )}
+
+          {/* Fallback grid pattern when no stream */}
+          {!stream && (
+            <div className="absolute inset-0 bg-gradient-to-br from-gray-800 to-gray-900">
+              <div className="absolute inset-0 opacity-10">
+                <div className="w-full h-full" style={{
+                  backgroundImage: `
+                    linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)
+                  `,
+                  backgroundSize: `${50 * scale}px ${50 * scale}px`,
+                }} />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Darkened areas outside selection */}
           <div className="absolute inset-0 pointer-events-none">

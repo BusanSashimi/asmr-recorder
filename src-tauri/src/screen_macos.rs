@@ -95,7 +95,7 @@ impl SCStreamOutputTrait for FrameHandler {
         // Blocking even briefly causes ScreenCaptureKit's pixel buffer pool to exhaust
         // which results in image_buffer() returning None (empty buffers)
         // It's better to drop a frame than to cause buffer pool exhaustion
-        if let Err(_e) = self.sender.try_send(frame) {
+        if let Err(e) = self.sender.try_send(frame) {
             // Only log occasionally to avoid spam
             if count % 30 == 0 {
                 eprintln!(

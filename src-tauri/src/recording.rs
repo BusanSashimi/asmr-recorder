@@ -149,6 +149,51 @@ impl Default for RecordingConfig {
     }
 }
 
+/// Configuration for external frame recording (frames sent from frontend)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalRecordingConfig {
+    /// Whether to capture microphone audio
+    pub capture_mic: bool,
+    
+    /// Whether to capture system audio
+    pub capture_system_audio: bool,
+    
+    /// Output file path (optional, will generate if not provided)
+    pub output_path: Option<PathBuf>,
+    
+    /// Video quality preset
+    pub video_quality: VideoQuality,
+    
+    /// Target frame rate (default 30)
+    pub frame_rate: Option<u32>,
+    
+    /// Output resolution (default 1080p, always 16:9)
+    #[serde(default)]
+    pub output_resolution: OutputResolution,
+    
+    /// Output width in pixels (must match frames sent from frontend)
+    pub output_width: u32,
+    
+    /// Output height in pixels (must match frames sent from frontend)
+    pub output_height: u32,
+}
+
+impl Default for ExternalRecordingConfig {
+    fn default() -> Self {
+        Self {
+            capture_mic: true,
+            capture_system_audio: false,
+            output_path: None,
+            video_quality: VideoQuality::default(),
+            frame_rate: Some(30),
+            output_resolution: OutputResolution::default(),
+            output_width: 1920,
+            output_height: 1080,
+        }
+    }
+}
+
 /// Current recording status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

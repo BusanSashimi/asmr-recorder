@@ -1,13 +1,14 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { defaultRecordingConfig, defaultSectionState } from "@/types/recording";
+import { defaultRecordingConfig, defaultSectionState, defaultExternalRecordingConfig, OUTPUT_RESOLUTIONS } from "@/types/recording";
 import type { 
   RecordingConfig, 
   RecordingStatus, 
   DeviceList, 
   SectionConfig, 
   SectionState,
-  RecordingSource 
+  RecordingSource,
+  ExternalRecordingConfig 
 } from "@/types/recording";
 
 interface RecordingContextValue {
@@ -28,6 +29,12 @@ interface RecordingContextValue {
   clearAllSections: () => void;
   browserDevices: MediaDeviceInfo[];
   fetchBrowserDevices: () => Promise<void>;
+  // External frame recording (frontend compositing)
+  externalConfig: ExternalRecordingConfig;
+  updateExternalConfig: (updates: Partial<ExternalRecordingConfig>) => void;
+  isExternalRecording: boolean;
+  startExternalRecording: () => Promise<void>;
+  stopExternalRecording: () => Promise<string>;
 }
 
 const RecordingContext = createContext<RecordingContextValue | null>(null);
@@ -46,6 +53,10 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   // Section-based recording state
   const [sectionState, setSectionState] = useState<SectionState>(defaultSectionState);
   const [browserDevices, setBrowserDevices] = useState<MediaDeviceInfo[]>([]);
+
+  // External frame recording state
+  const [externalConfig, setExternalConfig] = useState<ExternalRecordingConfig>(defaultExternalRecordingConfig);
+  const [isExternalRecording, setIsExternalRecording] = useState(false);
 
   // Fetch available devices from Tauri backend
   const fetchDevices = useCallback(async () => {
@@ -81,14 +92,18 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     fetchBrowserDevices();
   }, [fetchDevices, fetchBrowserDevices]);
 
-  // Poll recording status when recording
+  // Poll recording status when recording (native or external)
   useEffect(() => {
-    if (status.isRecording) {
+    const isRecordingActive = status.isRecording || isExternalRecording;
+    
+    if (isRecordingActive) {
       statusPollRef.current = window.setInterval(async () => {
         try {
-          const newStatus = await invoke<RecordingStatus>(
-            "get_recording_status_live"
-          );
+          // Use appropriate status endpoint based on recording mode
+          const statusCommand = isExternalRecording 
+            ? "get_external_recording_status" 
+            : "get_recording_status_live";
+          const newStatus = await invoke<RecordingStatus>(statusCommand);
           setStatus(newStatus);
         } catch (err) {
           console.error("Failed to fetch status:", err);
@@ -106,7 +121,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
         clearInterval(statusPollRef.current);
       }
     };
-  }, [status.isRecording]);
+  }, [status.isRecording, isExternalRecording]);
 
   // Start recording
   const startRecording = useCallback(async () => {
@@ -142,6 +157,62 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   // Update config
   const updateConfig = useCallback((updates: Partial<RecordingConfig>) => {
     setConfig((prev) => ({ ...prev, ...updates }));
+  }, []);
+
+  // Update external recording config
+  const updateExternalConfig = useCallback((updates: Partial<ExternalRecordingConfig>) => {
+    setExternalConfig((prev) => {
+      const newConfig = { ...prev, ...updates };
+      // Auto-update dimensions when resolution changes
+      if (updates.outputResolution) {
+        const { width, height } = OUTPUT_RESOLUTIONS[updates.outputResolution];
+        newConfig.outputWidth = width;
+        newConfig.outputHeight = height;
+      }
+      return newConfig;
+    });
+  }, []);
+
+  // Scale factor for recording (must match RECORDING_SCALE in recording-canvas.tsx)
+  const RECORDING_SCALE = 1 / 4;
+
+  // Start external frame recording
+  const startExternalRecording = useCallback(async () => {
+    setError(null);
+    try {
+      // Apply scale factor to dimensions for frame recording
+      const scaledConfig = {
+        ...externalConfig,
+        outputWidth: Math.round(externalConfig.outputWidth * RECORDING_SCALE),
+        outputHeight: Math.round(externalConfig.outputHeight * RECORDING_SCALE),
+      };
+      await invoke("start_external_recording", { config: scaledConfig });
+      setIsExternalRecording(true);
+      setStatus((prev) => ({ ...prev, isRecording: true, durationMs: 0, frameCount: 0 }));
+    } catch (err) {
+      const errorMessage = String(err);
+      setError(errorMessage);
+      throw err;
+    }
+  }, [externalConfig]);
+
+  // Stop external frame recording
+  const stopExternalRecording = useCallback(async () => {
+    setError(null);
+    try {
+      const outputPath = await invoke<string>("stop_external_recording");
+      setIsExternalRecording(false);
+      setStatus((prev) => ({
+        ...prev,
+        isRecording: false,
+        outputPath,
+      }));
+      return outputPath;
+    } catch (err) {
+      const errorMessage = String(err);
+      setError(errorMessage);
+      throw err;
+    }
   }, []);
 
   // Section management methods
@@ -247,6 +318,12 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     clearAllSections,
     browserDevices,
     fetchBrowserDevices,
+    // External frame recording
+    externalConfig,
+    updateExternalConfig,
+    isExternalRecording,
+    startExternalRecording,
+    stopExternalRecording,
   };
 
   return (

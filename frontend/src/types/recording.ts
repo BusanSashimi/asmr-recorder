@@ -59,6 +59,39 @@ export const defaultRecordingConfig: RecordingConfig = {
   outputResolution: "hd1080",
 };
 
+/**
+ * Configuration for external frame recording (frames sent from frontend)
+ * Used when recording the composite preview canvas instead of native capture
+ */
+export interface ExternalRecordingConfig {
+  /** Whether to capture microphone audio */
+  captureMic: boolean;
+  /** Whether to capture system audio */
+  captureSystemAudio: boolean;
+  /** Output file path (optional, will generate if not provided) */
+  outputPath?: string;
+  /** Video quality preset */
+  videoQuality: VideoQuality;
+  /** Target frame rate (default 30) */
+  frameRate?: number;
+  /** Output resolution preset */
+  outputResolution: OutputResolution;
+  /** Output width in pixels (must match frames sent from frontend) */
+  outputWidth: number;
+  /** Output height in pixels (must match frames sent from frontend) */
+  outputHeight: number;
+}
+
+export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
+  captureMic: true,
+  captureSystemAudio: false,
+  videoQuality: "medium",
+  frameRate: 15, // Lower frame rate for IPC performance
+  outputResolution: "hd1080",
+  outputWidth: 1920,
+  outputHeight: 1080,
+};
+
 export function formatDuration(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);

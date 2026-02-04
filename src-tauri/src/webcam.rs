@@ -225,6 +225,7 @@ fn capture_loop(
 
 /// List available webcam devices
 pub fn list_webcams() -> Vec<(usize, String)> {
+    use nokhwa::utils::CameraIndex;
     use nokhwa::query;
     
     let mut webcams = Vec::new();
