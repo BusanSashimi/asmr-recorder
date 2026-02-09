@@ -9,7 +9,15 @@
       "Bash(head:*)",
       "Bash(npm run build:*)",
       "Bash(timeout 10 npm run dev:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm run tauri build:*)",
+      "Bash(cargo build:*)",
+      "Bash(brew install:*)",
+      "Bash(npm run tauri:dev:*)",
+      "Bash(npm search:*)",
+      "Bash(npm install:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(ls:*)"
     ]
   }
 }

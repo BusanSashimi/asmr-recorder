@@ -64,13 +64,80 @@ fn receive_video_frame_base64(
     state: tauri::State<'_, Arc<ExternalRecorderState>>,
 ) -> Result<(), String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    
+
     // Decode base64 to bytes
     let data = STANDARD.decode(&data_base64)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
-    
+
     let mut recorder = state.recorder.lock();
     recorder.receive_frame(data, width, height, timestamp_ms)
+}
+
+/// Tauri command: Save media recording from frontend (WebM or MP4)
+/// Frontend handles encoding and muxing, backend just saves the file
+#[tauri::command]
+fn save_media_recording(
+    video_data: String,
+    width: u32,
+    height: u32,
+    mime_type: String,
+) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::path::PathBuf;
+
+    // Decode base64 video data
+    let video_bytes = STANDARD.decode(&video_data)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+    // Determine file extension from mime type
+    let extension = if mime_type.contains("webm") {
+        "webm"
+    } else if mime_type.contains("mp4") {
+        "mp4"
+    } else {
+        "webm" // Default to webm
+    };
+
+    // Generate output path
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("recording_{}.{}", timestamp, extension);
+
+    // In debug/dev mode, save to test-results directory
+    #[cfg(debug_assertions)]
+    let output_path = {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let test_results_dir = PathBuf::from(manifest_dir).join("../test-results");
+
+        // Create directory if it doesn't exist
+        std::fs::create_dir_all(&test_results_dir)
+            .map_err(|e| format!("Failed to create test-results directory: {}", e))?;
+
+        test_results_dir.join(&filename)
+    };
+
+    // In release mode, save to user's videos directory
+    #[cfg(not(debug_assertions))]
+    let output_path = {
+        let videos_dir = dirs::video_dir()
+            .ok_or("Could not find videos directory")?;
+        videos_dir.join(&filename)
+    };
+
+    // Write video file
+    std::fs::write(&output_path, &video_bytes)
+        .map_err(|e| format!("Failed to write video file: {}", e))?;
+
+    let path_str = output_path.to_string_lossy().to_string();
+    println!(
+        "[Backend-MediaRecorder] Saved {}: {} ({}x{}, {} bytes)",
+        extension.to_uppercase(),
+        path_str,
+        width,
+        height,
+        video_bytes.len()
+    );
+
+    Ok(path_str)
 }
 
 /// Tauri command: Stop external frame recording
@@ -126,6 +193,8 @@ pub fn run() {
             receive_video_frame_base64,
             stop_external_recording,
             get_external_recording_status,
+            // MediaRecorder recording
+            save_media_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

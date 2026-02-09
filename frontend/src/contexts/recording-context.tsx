@@ -174,7 +174,8 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Scale factor for recording (must match RECORDING_SCALE in recording-canvas.tsx)
-  const RECORDING_SCALE = 1 / 4;
+  // NOW USING MediaRecorder API: Browser-native canvas recording, full 1920x1080 @ 60fps capable!
+  const RECORDING_SCALE = 1 / 1;
 
   // Start external frame recording
   const startExternalRecording = useCallback(async () => {

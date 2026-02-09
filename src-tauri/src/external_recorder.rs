@@ -394,6 +394,11 @@ impl ExternalRecorder {
         self.status.lock().is_recording
     }
 
+    /// Get the current frame count
+    pub fn get_frame_count(&self) -> u64 {
+        *self.frame_count.lock()
+    }
+
     fn handle_encoder_errors(&mut self) {
         let error_message = match self.encoder_error_receiver.as_ref() {
             Some(receiver) => receiver.try_recv().ok(),

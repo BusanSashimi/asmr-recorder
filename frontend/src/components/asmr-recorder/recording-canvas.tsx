@@ -38,11 +38,10 @@ export interface RecordingCanvasRef {
   captureFrame: () => void;
 }
 
-// Scale factor for recording (to reduce data transfer overhead)
-// IPC throughput testing shows 1/2 scale causes 80% frame drops
-// Using 1/4 scale as compromise between quality and performance
-// 1/4 = 480x270 for 1080p output (~518KB per frame)
-const RECORDING_SCALE = 1 / 4;
+// Scale factor for recording
+// NOW USING MediaRecorder API: Browser-native canvas recording!
+// Automatic encoding and muxing, full 1920x1080 @ 60fps capable
+const RECORDING_SCALE = 1 / 1;
 
 /**
  * RecordingCanvas - Composites 4 section sources into a 2x2 grid and sends frames to Tauri
@@ -73,12 +72,9 @@ export const RecordingCanvas = forwardRef<
   const recordingHeight = Math.floor(outputHeight * RECORDING_SCALE);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const recordingCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
   const recordingStartTimeRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0);
-  const isSendingRef = useRef<boolean>(false);
-  const droppedFramesRef = useRef<number>(0);
   const lastFrameTimeRef = useRef<number>(0);
   const watchdogIntervalRef = useRef<number | null>(null);
   const sectionSourcesRef =
@@ -90,6 +86,10 @@ export const RecordingCanvas = forwardRef<
   const recordingHeightRef = useRef(recordingHeight);
   const frameRateRef = useRef(frameRate);
   const onFrameErrorRef = useRef(onFrameError);
+
+  // MediaRecorder for recording canvas stream
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   // Update refs when props change
   useEffect(() => {
@@ -104,7 +104,7 @@ export const RecordingCanvas = forwardRef<
   // Expose methods via ref
   useImperativeHandle(ref, () => ({
     getCanvas: () => canvasRef.current,
-    captureFrame: () => captureAndSendFrame(),
+    captureFrame: () => updateFrame(),
   }));
 
   /**
@@ -264,167 +264,205 @@ export const RecordingCanvas = forwardRef<
   }, [outputWidth, outputHeight, sectionWidth, sectionHeight, drawSection]);
 
   /**
-   * Capture frame and send to Tauri
+   * Initialize MediaRecorder to capture canvas stream
    */
-  const captureAndSendFrame = useCallback(() => {
-    // Skip if previous frame is still being sent (backpressure)
-    if (isSendingRef.current) {
-      droppedFramesRef.current++;
-      return;
+  const initializeRecorder = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      throw new Error('Canvas not available');
     }
 
+    const width = recordingWidthRef.current;
+    const height = recordingHeightRef.current;
+    const fps = frameRateRef.current;
+
+    try {
+      // Create a stream from the canvas
+      const stream = canvas.captureStream(fps);
+
+      // Clear previous chunks
+      recordedChunksRef.current = [];
+
+      // Determine best codec - prefer VP9 > H264 > VP8
+      let mimeType = 'video/webm;codecs=vp9';
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = 'video/webm;codecs=h264';
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          mimeType = 'video/webm;codecs=vp8';
+          if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = 'video/webm'; // Fallback to default
+          }
+        }
+      }
+
+      console.log(`[MediaRecorder] Using codec: ${mimeType}`);
+
+      // Create MediaRecorder
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: 5_000_000, // 5 Mbps - high quality
+      });
+
+      // Collect data chunks
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+
+      // Handle stop event
+      recorder.onstop = async () => {
+        console.log(`[MediaRecorder] Recording stopped, ${recordedChunksRef.current.length} chunks collected`);
+
+        // Create final blob
+        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+        console.log(`[MediaRecorder] Final video size: ${blob.size} bytes`);
+
+        try {
+          // Convert blob to base64
+          const arrayBuffer = await blob.arrayBuffer();
+          const uint8Array = new Uint8Array(arrayBuffer);
+
+          let binaryStr = "";
+          const chunkSize = 32768;
+          for (let i = 0; i < uint8Array.length; i += chunkSize) {
+            const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
+            binaryStr += String.fromCharCode.apply(null, chunk as unknown as number[]);
+          }
+          const base64Data = btoa(binaryStr);
+
+          // Send to backend (we'll use a new command that accepts WebM)
+          await invoke('save_media_recording', {
+            videoData: base64Data,
+            width,
+            height,
+            mimeType,
+          });
+
+          console.log(`[MediaRecorder] Video saved successfully`);
+        } catch (error) {
+          console.error('[MediaRecorder] Error saving video:', error);
+          onFrameErrorRef.current?.(String(error));
+        }
+      };
+
+      recorder.onerror = (event) => {
+        console.error('[MediaRecorder] Recording error:', event);
+        onFrameErrorRef.current?.('MediaRecorder error');
+      };
+
+      mediaRecorderRef.current = recorder;
+      console.log(`[MediaRecorder] Initialized: ${width}x${height} @ ${fps}fps`);
+    } catch (error) {
+      console.error('[MediaRecorder] Failed to initialize:', error);
+      throw error;
+    }
+  }, []);
+
+  /**
+   * Composite a frame on the canvas (MediaRecorder will capture automatically)
+   */
+  const updateFrame = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // First composite the frame on the display canvas
-    compositeFrame();
+    const perfStart = performance.now();
 
-    // Get current dimensions from refs
-    const width = recordingWidthRef.current;
-    const height = recordingHeightRef.current;
+    try {
+      // Composite the frame on the canvas
+      compositeFrame();
+      const compositeTime = performance.now() - perfStart;
 
-    // Create or get the recording canvas (scaled down for performance)
-    if (!recordingCanvasRef.current) {
-      recordingCanvasRef.current = document.createElement("canvas");
-      recordingCanvasRef.current.width = width;
-      recordingCanvasRef.current.height = height;
-    }
+      frameCountRef.current++;
+      lastFrameTimeRef.current = performance.now();
 
-    const recordingCanvas = recordingCanvasRef.current;
-    const recordingCtx = recordingCanvas.getContext("2d", {
-      willReadFrequently: true,
-    });
-    if (!recordingCtx) return;
-
-    // Draw scaled version to recording canvas
-    recordingCtx.drawImage(canvas, 0, 0, width, height);
-
-    // Get pixel data (RGBA) as Uint8Array for efficient binary transfer
-    const imageData = recordingCtx.getImageData(0, 0, width, height);
-
-    // Calculate timestamp
-    const timestampMs = performance.now() - recordingStartTimeRef.current;
-
-    // Mark as sending
-    isSendingRef.current = true;
-
-    // Send frame asynchronously - use Promise.resolve to defer to next tick
-    Promise.resolve().then(async () => {
-      const startTime = performance.now();
-      try {
-        // Use base64 encoding - faster than JSON array for large binary data
-        // Base64 is ~33% larger but encoding is much faster than array iteration
-        const uint8Array = new Uint8Array(imageData.data.buffer);
-        
-        // Convert to base64 using btoa with chunked processing for large arrays
-        let binaryStr = "";
-        const chunkSize = 32768; // Process in 32KB chunks to avoid call stack issues
-        for (let i = 0; i < uint8Array.length; i += chunkSize) {
-          const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
-          binaryStr += String.fromCharCode.apply(null, chunk as unknown as number[]);
-        }
-        const base64Data = btoa(binaryStr);
-
-        if (frameCountRef.current === 0) {
-          const encodeTime = performance.now() - startTime;
-          console.log(
-            `[RecordingCanvas] Sending first frame: ${uint8Array.length} bytes -> ${base64Data.length} base64 chars (encode: ${encodeTime.toFixed(1)}ms)`,
-          );
-        }
-
-        await invoke("receive_video_frame_base64", {
-          dataBase64: base64Data,
-          width: width,
-          height: height,
-          timestampMs: Math.round(timestampMs),
-        });
-
-        frameCountRef.current++;
-        lastFrameTimeRef.current = performance.now();
-
-        // Log progress every 30 frames
-        if (frameCountRef.current % 30 === 0) {
-          const totalTime = performance.now() - startTime;
-          console.log(
-            `[RecordingCanvas] Progress: ${frameCountRef.current} frames sent, ${droppedFramesRef.current} dropped (last frame: ${totalTime.toFixed(1)}ms)`,
-          );
-        }
-      } catch (error) {
-        console.error(
-          `[RecordingCanvas] Failed to send frame ${frameCountRef.current}:`,
-          error,
+      // Log progress every 30 frames
+      if (frameCountRef.current % 30 === 0) {
+        const elapsed = (performance.now() - recordingStartTimeRef.current) / 1000;
+        const fps = frameCountRef.current / elapsed;
+        console.log(
+          `[RecordingCanvas-MediaRecorder] Frame ${frameCountRef.current}: ` +
+          `composite=${compositeTime.toFixed(1)}ms, ` +
+          `fps=${fps.toFixed(1)}, ` +
+          `elapsed=${elapsed.toFixed(1)}s`
         );
-
-        // Check if this is a "Not recording" error (happens on stop, expected)
-        if (!String(error).includes("Not recording")) {
-          onFrameErrorRef.current?.(String(error));
-        }
-      } finally {
-        isSendingRef.current = false;
       }
-    });
+    } catch (error) {
+      console.error(
+        `[RecordingCanvas] Failed to composite frame ${frameCountRef.current}:`,
+        error,
+      );
+      onFrameErrorRef.current?.(String(error));
+    }
   }, [compositeFrame]);
 
-  // Start/stop frame capture based on recording state
+  // Start/stop recording based on recording state
   useEffect(() => {
     if (!isRecording) {
       return;
     }
 
-    // Start recording
-    console.log(`[RecordingCanvas] Starting recording session`);
-    recordingStartTimeRef.current = performance.now();
-    frameCountRef.current = 0;
-    droppedFramesRef.current = 0;
-    lastFrameTimeRef.current = performance.now();
+    // Initialize and start recording
+    try {
+      console.log(`[RecordingCanvas] Starting recording session`);
+      recordingStartTimeRef.current = performance.now();
+      frameCountRef.current = 0;
+      lastFrameTimeRef.current = performance.now();
 
-    const intervalMs = 1000 / frameRateRef.current;
-    console.log(
-      `[RecordingCanvas] Starting capture: ${recordingWidthRef.current}x${recordingHeightRef.current} @ ${frameRateRef.current}fps (${intervalMs}ms interval)`,
-    );
-    console.log(
-      `[RecordingCanvas] Frame data size: ${recordingWidthRef.current * recordingHeightRef.current * 4} bytes per frame`,
-    );
+      // Initialize MediaRecorder
+      initializeRecorder();
 
-    // Frame capture interval
-    frameIntervalRef.current = window.setInterval(() => {
-      const elapsed =
-        (performance.now() - recordingStartTimeRef.current) / 1000;
-      if (frameCountRef.current % 50 === 0) {
-        console.log(
-          `[RecordingCanvas] Interval still running: ${frameCountRef.current} frames, ${elapsed.toFixed(1)}s elapsed, interval ID: ${frameIntervalRef.current}`,
-        );
+      // Start MediaRecorder
+      const recorder = mediaRecorderRef.current;
+      if (!recorder) {
+        throw new Error('MediaRecorder not initialized');
       }
 
-      try {
-        captureAndSendFrame();
-      } catch (error) {
-        console.error(
-          `[RecordingCanvas] Error in capture loop at frame ${frameCountRef.current}:`,
-          error,
-        );
-      }
-    }, intervalMs);
+      // Start recording with 1 second chunks
+      recorder.start(1000);
+      console.log(
+        `[RecordingCanvas] Recording started: ${recordingWidthRef.current}x${recordingHeightRef.current} @ ${frameRateRef.current}fps`,
+      );
 
-    console.log(
-      `[RecordingCanvas] Interval started with ID: ${frameIntervalRef.current}`,
-    );
+      // Composite frame interval to keep canvas updated
+      const intervalMs = 1000 / frameRateRef.current;
+      frameIntervalRef.current = window.setInterval(() => {
+        try {
+          updateFrame();
+        } catch (error) {
+          console.error(
+            `[RecordingCanvas] Error in composite loop at frame ${frameCountRef.current}:`,
+            error,
+          );
+        }
+      }, intervalMs);
 
-    // Watchdog to detect stalls
-    watchdogIntervalRef.current = window.setInterval(() => {
-      const timeSinceLastFrame = performance.now() - lastFrameTimeRef.current;
-      const expectedInterval = 1000 / frameRateRef.current;
+      console.log(
+        `[RecordingCanvas] Composite interval started at ${intervalMs}ms (${frameRateRef.current}fps)`,
+      );
 
-      if (timeSinceLastFrame > expectedInterval * 3) {
-        console.error(
-          `[RecordingCanvas] WATCHDOG: No frame sent in ${(timeSinceLastFrame / 1000).toFixed(1)}s! Last frame: ${frameCountRef.current}, isSending: ${isSendingRef.current}, interval ID: ${frameIntervalRef.current}`,
-        );
-      }
-    }, 1000);
+      // Watchdog to detect stalls
+      watchdogIntervalRef.current = window.setInterval(() => {
+        const timeSinceLastFrame = performance.now() - lastFrameTimeRef.current;
+        const expectedInterval = 1000 / frameRateRef.current;
+
+        if (timeSinceLastFrame > expectedInterval * 3) {
+          console.warn(
+            `[RecordingCanvas] WATCHDOG: No frame composited in ${(timeSinceLastFrame / 1000).toFixed(1)}s! ` +
+            `Last frame: ${frameCountRef.current}`,
+          );
+        }
+      }, 1000);
+    } catch (error) {
+      console.error('[RecordingCanvas] Failed to start recording:', error);
+      onFrameErrorRef.current?.(String(error));
+    }
 
     // Cleanup
     return () => {
-      console.log(`[RecordingCanvas] Cleanup - stopping intervals`);
+      console.log(`[RecordingCanvas] Cleanup - stopping recording`);
+
+      // Stop intervals
       if (frameIntervalRef.current !== null) {
         clearInterval(frameIntervalRef.current);
         frameIntervalRef.current = null;
@@ -434,20 +472,23 @@ export const RecordingCanvas = forwardRef<
         watchdogIntervalRef.current = null;
       }
 
+      // Stop MediaRecorder (will trigger onstop handler)
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try {
+          mediaRecorderRef.current.stop();
+          console.log('[RecordingCanvas] MediaRecorder stopped');
+        } catch (error) {
+          console.error('[RecordingCanvas] Error stopping MediaRecorder:', error);
+        }
+      }
+
       const elapsed =
         (performance.now() - recordingStartTimeRef.current) / 1000;
       console.log(
-        `[RecordingCanvas] Session ended: ${frameCountRef.current} frames captured, ${droppedFramesRef.current} dropped, ${elapsed.toFixed(1)}s elapsed`,
+        `[RecordingCanvas] Session ended: ${frameCountRef.current} frames composited, ${elapsed.toFixed(1)}s elapsed`,
       );
-
-      const expectedFrames = Math.floor(elapsed * frameRateRef.current);
-      if (frameCountRef.current < expectedFrames * 0.7) {
-        console.error(
-          `[RecordingCanvas] WARNING: Only captured ${frameCountRef.current} frames in ${elapsed.toFixed(1)}s, expected ~${expectedFrames} frames`,
-        );
-      }
     };
-  }, [isRecording]); // Only depend on isRecording to prevent restarts
+  }, [isRecording, initializeRecorder, updateFrame]);
 
   // Set canvas size
   useEffect(() => {
