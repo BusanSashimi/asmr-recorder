@@ -82,11 +82,6 @@ impl Encoder {
         self.error_sender = Some(sender);
     }
     
-    /// Get the number of frames encoded
-    pub fn frames_encoded(&self) -> u64 {
-        *self.frames_encoded.lock()
-    }
-    
     /// Start encoding
     pub fn start(&self) -> Result<(), String> {
         let mut running = self.running.lock();
@@ -97,10 +92,12 @@ impl Encoder {
         drop(running);
         
         let running_clone = self.running.clone();
+        #[cfg(feature = "ffmpeg")]
         let running_control = self.running.clone();
         let frames_encoded = self.frames_encoded.clone();
         let video_receiver = self.video_receiver.clone();
         let audio_receiver = self.audio_receiver.clone();
+        #[cfg(feature = "ffmpeg")]
         let error_sender = self.error_sender.clone();
         let config = EncoderConfig {
             output_path: self.config.output_path.clone(),
@@ -157,12 +154,9 @@ impl Encoder {
         Ok(())
     }
     
-    /// Check if encoder is running
-    pub fn is_running(&self) -> bool {
-        *self.running.lock()
-    }
 }
 
+#[cfg(feature = "ffmpeg")]
 fn remove_failed_output(output_path: &str) {
     if std::fs::metadata(output_path).is_ok() {
         if let Err(e) = std::fs::remove_file(output_path) {

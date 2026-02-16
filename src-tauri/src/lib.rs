@@ -4,7 +4,6 @@ use parking_lot::Mutex;
 
 mod audio;
 mod screen;
-mod screen_capture;
 mod webcam;
 mod compositor;
 mod system_audio;

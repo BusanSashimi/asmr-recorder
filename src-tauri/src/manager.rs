@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 
-use crate::audio::{AudioChunk, MicrophoneCapture, MicrophoneCaptureConfig};
-use crate::audio_mixer::{AudioMixer, AudioMixerConfig, MixedAudioChunk};
+use crate::audio::{MicrophoneCapture, MicrophoneCaptureConfig};
+use crate::audio_mixer::{AudioMixer, AudioMixerConfig};
 use crate::compositor::{CompositeFrame, CompositorConfig, VideoCompositor};
 use crate::encoder::{Encoder, EncoderConfig};
-use crate::recording::{OutputResolution, PipPosition, RecordingConfig, RecordingStatus, VideoQuality};
+use crate::recording::{RecordingConfig, RecordingStatus};
 use crate::screen::{ScreenCapture, ScreenCaptureConfig, ScreenFrame};
 use crate::system_audio::{SystemAudioCapture, SystemAudioCaptureConfig};
 use crate::webcam::{WebcamCapture, WebcamCaptureConfig, WebcamFrame};
@@ -446,10 +446,6 @@ impl Default for RecordingManager {
         Self::new()
     }
 }
-
-/// Timeout for sending composite frames to encoder
-/// Shorter timeout keeps the pipeline responsive
-const COMPOSITE_SEND_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Compositor loop - combines screen and webcam frames
 fn compositor_loop(

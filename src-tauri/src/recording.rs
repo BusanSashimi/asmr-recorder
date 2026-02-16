@@ -256,18 +256,6 @@ pub enum RecordingError {
     #[error("No video source selected")]
     NoVideoSource,
     
-    #[error("Screen capture error: {0}")]
-    ScreenCapture(String),
-    
-    #[error("Webcam error: {0}")]
-    Webcam(String),
-    
-    #[error("Audio error: {0}")]
-    Audio(String),
-    
-    #[error("Encoding error: {0}")]
-    Encoding(String),
-    
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

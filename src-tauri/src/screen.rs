@@ -79,10 +79,6 @@ impl ScreenFrame {
         bgra
     }
 
-    /// Check if data is already tightly packed (stride == width * 4)
-    pub fn is_packed(&self) -> bool {
-        self.stride == (self.width * 4) as usize
-    }
 }
 
 /// Screen capture configuration

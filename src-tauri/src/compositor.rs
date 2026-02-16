@@ -5,6 +5,7 @@ use image::{ImageBuffer, Rgba, RgbaImage};
 
 /// A composited video frame ready for encoding
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct CompositeFrame {
     /// Pixel data (RGBA or BGRA depending on is_bgra flag)
     pub data: Vec<u8>,
@@ -264,21 +265,11 @@ impl VideoCompositor {
         }
     }
     
-    /// Get output dimensions
-    pub fn output_dimensions(&self) -> (u32, u32) {
-        (self.config.output_width, self.config.output_height)
-    }
-    
-    /// Get PiP dimensions
-    pub fn pip_dimensions(&self) -> (u32, u32) {
-        (self.pip_width, self.pip_height)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     
     #[test]
     fn test_pip_position_calculation() {
@@ -306,9 +297,6 @@ mod tests {
             pip_padding: 20,
         };
         
-        let compositor = VideoCompositor::new(config);
-        let (w, h) = compositor.output_dimensions();
-        assert_eq!(w, 1920);
-        assert_eq!(h, 1080);
+        let _compositor = VideoCompositor::new(config);
     }
 }

@@ -7,6 +7,7 @@ use crate::audio::AudioChunk;
 
 /// Mixed audio output chunk
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct MixedAudioChunk {
     /// Mixed audio samples (f32 format)
     pub samples: Vec<f32>,
@@ -16,16 +17,6 @@ pub struct MixedAudioChunk {
     pub channels: u16,
     /// Timestamp
     pub timestamp: Duration,
-}
-
-impl MixedAudioChunk {
-    /// Convert to i16 format for encoding
-    pub fn to_i16(&self) -> Vec<i16> {
-        self.samples
-            .iter()
-            .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-            .collect()
-    }
 }
 
 /// Audio mixer configuration
@@ -135,20 +126,6 @@ impl AudioMixer {
         println!("Audio mixer stopped");
     }
     
-    /// Check if mixer is running
-    pub fn is_running(&self) -> bool {
-        *self.running.lock()
-    }
-    
-    /// Update microphone volume
-    pub fn set_mic_volume(&mut self, volume: f32) {
-        self.config.mic_volume = volume.clamp(0.0, 2.0);
-    }
-    
-    /// Update system audio volume
-    pub fn set_system_volume(&mut self, volume: f32) {
-        self.config.system_volume = volume.clamp(0.0, 2.0);
-    }
 }
 
 /// The main mixing loop

@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, Stream};
+use cpal::SampleFormat;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -19,68 +19,16 @@ pub struct AudioChunk {
     pub timestamp: Duration,
 }
 
-impl AudioChunk {
-    /// Get duration of this chunk in seconds
-    pub fn duration_secs(&self) -> f64 {
-        let num_frames = self.samples.len() / self.channels as usize;
-        num_frames as f64 / self.sample_rate as f64
-    }
-    
-    /// Convert to mono by averaging channels
-    pub fn to_mono(&self) -> Vec<f32> {
-        if self.channels == 1 {
-            return self.samples.clone();
-        }
-        
-        let num_frames = self.samples.len() / self.channels as usize;
-        let mut mono = Vec::with_capacity(num_frames);
-        
-        for i in 0..num_frames {
-            let mut sum = 0.0f32;
-            for ch in 0..self.channels as usize {
-                sum += self.samples[i * self.channels as usize + ch];
-            }
-            mono.push(sum / self.channels as f32);
-        }
-        
-        mono
-    }
-    
-    /// Convert samples to i16 format for encoding
-    pub fn to_i16(&self) -> Vec<i16> {
-        self.samples
-            .iter()
-            .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-            .collect()
-    }
-}
-
-/// Audio source type
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AudioSource {
-    Microphone,
-    SystemAudio,
-}
-
 /// Microphone capture configuration
 pub struct MicrophoneCaptureConfig {
-    /// Target sample rate
-    pub sample_rate: u32,
-    /// Number of channels (1 = mono, 2 = stereo)
-    pub channels: u16,
     /// Device name (None for default)
     pub device_name: Option<String>,
-    /// Buffer size in samples per callback
-    pub buffer_size: u32,
 }
 
 impl Default for MicrophoneCaptureConfig {
     fn default() -> Self {
         Self {
-            sample_rate: 48000,
-            channels: 2,
             device_name: None,
-            buffer_size: 1024,
         }
     }
 }
@@ -131,11 +79,6 @@ impl MicrophoneCapture {
         })
     }
     
-    /// Get actual audio format
-    pub fn format(&self) -> (u32, u16) {
-        (self.actual_sample_rate, self.actual_channels)
-    }
-    
     /// Get a receiver for audio chunks
     pub fn take_receiver(&mut self) -> Option<Receiver<AudioChunk>> {
         self.chunk_receiver.take()
@@ -182,10 +125,6 @@ impl MicrophoneCapture {
         println!("Microphone capture stopped");
     }
     
-    /// Check if capture is running
-    pub fn is_running(&self) -> bool {
-        *self.running.lock()
-    }
 }
 
 /// Run the audio capture in a background thread
@@ -299,29 +238,6 @@ fn run_audio_capture(
     Ok(())
 }
 
-/// List available input devices
-pub fn list_input_devices() -> Vec<(String, String)> {
-    let host = cpal::default_host();
-    let mut devices = Vec::new();
-    
-    if let Ok(input_devices) = host.input_devices() {
-        for device in input_devices {
-            if let Ok(name) = device.name() {
-                devices.push((name.clone(), name));
-            }
-        }
-    }
-    
-    devices
-}
-
-/// Get default input device info
-pub fn get_default_input_device() -> Option<String> {
-    let host = cpal::default_host();
-    host.default_input_device()
-        .and_then(|d| d.name().ok())
-}
-
 /// Legacy Tauri command for backward compatibility
 #[command]
 pub fn start_audio_capture() {
@@ -338,35 +254,3 @@ pub fn start_audio_capture() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_audio_chunk_to_mono() {
-        // Stereo input: L=0.5, R=0.5, L=1.0, R=0.0
-        let chunk = AudioChunk {
-            samples: vec![0.5, 0.5, 1.0, 0.0],
-            sample_rate: 48000,
-            channels: 2,
-            timestamp: Duration::from_secs(0),
-        };
-        
-        let mono = chunk.to_mono();
-        assert_eq!(mono.len(), 2);
-        assert!((mono[0] - 0.5).abs() < 0.001); // (0.5 + 0.5) / 2
-        assert!((mono[1] - 0.5).abs() < 0.001); // (1.0 + 0.0) / 2
-    }
-    
-    #[test]
-    fn test_audio_chunk_duration() {
-        let chunk = AudioChunk {
-            samples: vec![0.0; 48000 * 2], // 1 second of stereo
-            sample_rate: 48000,
-            channels: 2,
-            timestamp: Duration::from_secs(0),
-        };
-        
-        assert!((chunk.duration_secs() - 1.0).abs() < 0.001);
-    }
-}

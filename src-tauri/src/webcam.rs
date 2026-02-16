@@ -95,11 +95,6 @@ impl WebcamCapture {
         })
     }
     
-    /// Get the actual capture dimensions
-    pub fn dimensions(&self) -> (u32, u32) {
-        (self.actual_width, self.actual_height)
-    }
-    
     /// Get a receiver for captured frames
     pub fn take_receiver(&mut self) -> Option<Receiver<WebcamFrame>> {
         self.frame_receiver.take()
@@ -139,10 +134,6 @@ impl WebcamCapture {
         *running = false;
     }
     
-    /// Check if capture is running
-    pub fn is_running(&self) -> bool {
-        *self.running.lock()
-    }
 }
 
 /// The main webcam capture loop
@@ -221,34 +212,6 @@ fn capture_loop(
     
     println!("Webcam capture stopped");
     Ok(())
-}
-
-/// List available webcam devices
-pub fn list_webcams() -> Vec<(usize, String)> {
-    use nokhwa::utils::CameraIndex;
-    use nokhwa::query;
-    
-    let mut webcams = Vec::new();
-    
-    // Query available cameras
-    match query(nokhwa::utils::ApiBackend::Auto) {
-        Ok(cameras) => {
-            for (idx, camera_info) in cameras.iter().enumerate() {
-                webcams.push((idx, camera_info.human_name().to_string()));
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to query cameras: {}", e);
-            // Return default camera as fallback
-            webcams.push((0, "Default Camera".to_string()));
-        }
-    }
-    
-    if webcams.is_empty() {
-        webcams.push((0, "Default Camera".to_string()));
-    }
-    
-    webcams
 }
 
 #[cfg(test)]

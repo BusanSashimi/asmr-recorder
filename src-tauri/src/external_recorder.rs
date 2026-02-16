@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Sender, Receiver};
 use parking_lot::Mutex;
 
-use crate::audio::{AudioChunk, MicrophoneCapture, MicrophoneCaptureConfig};
-use crate::audio_mixer::{AudioMixer, AudioMixerConfig, MixedAudioChunk};
+use crate::audio::{MicrophoneCapture, MicrophoneCaptureConfig};
+use crate::audio_mixer::{AudioMixer, AudioMixerConfig};
 use crate::compositor::CompositeFrame;
 use crate::encoder::{Encoder, EncoderConfig};
-use crate::recording::{ExternalRecordingConfig, RecordingStatus, VideoQuality};
+use crate::recording::{ExternalRecordingConfig, RecordingStatus};
 use crate::system_audio::{SystemAudioCapture, SystemAudioCaptureConfig};
 
 /// External Frame Recorder - records video frames sent from the frontend

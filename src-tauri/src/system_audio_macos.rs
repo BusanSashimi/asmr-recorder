@@ -128,16 +128,13 @@ impl SystemAudioCapture {
         *running = false;
 
         let mut stream_guard = self.stream.lock();
-        if let Some(mut stream) = stream_guard.take() {
+        if let Some(stream) = stream_guard.take() {
             let _ = stream.stop_capture();
         }
 
         println!("System audio capture stopped");
     }
 
-    pub fn is_running(&self) -> bool {
-        *self.running.lock()
-    }
 }
 
 pub fn is_system_audio_available() -> bool {
