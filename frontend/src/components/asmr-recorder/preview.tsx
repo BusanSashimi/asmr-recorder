@@ -634,6 +634,8 @@ export function Preview({ isRecording = false }: PreviewProps) {
         onFrameError={handleFrameError}
         sectionSources={sectionSources}
         getSectionSources={getSectionSources}
+        captureMic={externalConfig.captureMic}
+        captureSystemAudio={externalConfig.captureSystemAudio}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -52,6 +52,18 @@ export function Toolbar() {
     stopExternalRecording,
   } = useRecordingContext();
 
+  // Track output path changes to show save confirmation toast
+  const previousOutputPathRef = useRef(status.outputPath);
+  useEffect(() => {
+    if (status.outputPath && status.outputPath !== previousOutputPathRef.current) {
+      toast({
+        title: "Recording saved",
+        description: `Saved to: ${status.outputPath}`,
+      });
+    }
+    previousOutputPathRef.current = status.outputPath;
+  }, [status.outputPath]);
+
   // Check if any section has content (for enabling record button)
   const hasContent = sectionState.sections.some(
     (section) => section.source !== null
@@ -60,10 +72,10 @@ export function Toolbar() {
   const handleRecord = async () => {
     try {
       if (status.isRecording || isExternalRecording) {
-        const outputPath = await stopExternalRecording();
+        await stopExternalRecording();
         toast({
           title: "Recording stopped",
-          description: `Saved to: ${outputPath}`,
+          description: "Saving recording...",
         });
       } else {
         await startExternalRecording();

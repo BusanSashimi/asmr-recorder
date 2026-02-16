@@ -57,6 +57,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   // External frame recording state
   const [externalConfig, setExternalConfig] = useState<ExternalRecordingConfig>(defaultExternalRecordingConfig);
   const [isExternalRecording, setIsExternalRecording] = useState(false);
+  const recordingStartTimeRef = useRef<number>(0);
 
   // Fetch available devices from Tauri backend
   const fetchDevices = useCallback(async () => {
@@ -99,12 +100,14 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     if (isRecordingActive) {
       statusPollRef.current = window.setInterval(async () => {
         try {
-          // Use appropriate status endpoint based on recording mode
-          const statusCommand = isExternalRecording 
-            ? "get_external_recording_status" 
-            : "get_recording_status_live";
-          const newStatus = await invoke<RecordingStatus>(statusCommand);
-          setStatus(newStatus);
+          if (isExternalRecording) {
+            // Track duration locally for MediaRecorder-based recording
+            const elapsedMs = Date.now() - recordingStartTimeRef.current;
+            setStatus((prev) => ({ ...prev, durationMs: elapsedMs }));
+          } else {
+            const newStatus = await invoke<RecordingStatus>("get_recording_status_live");
+            setStatus(newStatus);
+          }
         } catch (err) {
           console.error("Failed to fetch status:", err);
         }
@@ -173,21 +176,11 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  // Scale factor for recording (must match RECORDING_SCALE in recording-canvas.tsx)
-  // NOW USING MediaRecorder API: Browser-native canvas recording, full 1920x1080 @ 60fps capable!
-  const RECORDING_SCALE = 1 / 1;
-
-  // Start external frame recording
+  // Start recording via MediaRecorder (browser-native canvas recording)
   const startExternalRecording = useCallback(async () => {
     setError(null);
     try {
-      // Apply scale factor to dimensions for frame recording
-      const scaledConfig = {
-        ...externalConfig,
-        outputWidth: Math.round(externalConfig.outputWidth * RECORDING_SCALE),
-        outputHeight: Math.round(externalConfig.outputHeight * RECORDING_SCALE),
-      };
-      await invoke("start_external_recording", { config: scaledConfig });
+      recordingStartTimeRef.current = Date.now();
       setIsExternalRecording(true);
       setStatus((prev) => ({ ...prev, isRecording: true, durationMs: 0, frameCount: 0 }));
     } catch (err) {
@@ -195,26 +188,25 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
       setError(errorMessage);
       throw err;
     }
-  }, [externalConfig]);
+  }, []);
 
-  // Stop external frame recording
+  // Stop recording (MediaRecorder will save the file asynchronously via recording-canvas)
   const stopExternalRecording = useCallback(async () => {
     setError(null);
     try {
-      const outputPath = await invoke<string>("stop_external_recording");
       setIsExternalRecording(false);
       setStatus((prev) => ({
         ...prev,
         isRecording: false,
-        outputPath,
       }));
-      return outputPath;
+      // The output path will be set asynchronously when recording-canvas finishes saving
+      return status.outputPath || "";
     } catch (err) {
       const errorMessage = String(err);
       setError(errorMessage);
       throw err;
     }
-  }, []);
+  }, [status.outputPath]);
 
   // Section management methods
   const setActiveSectionIndex = useCallback((index: number | null) => {
@@ -288,6 +280,21 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
       });
       return defaultSectionState;
     });
+  }, []);
+
+  // Listen for recording saved events from RecordingCanvas
+  useEffect(() => {
+    const handleRecordingSaved = (event: Event) => {
+      const customEvent = event as CustomEvent<{ path: string }>;
+      const savedPath = customEvent.detail?.path;
+      if (savedPath) {
+        setStatus((prev) => ({ ...prev, outputPath: savedPath }));
+      }
+    };
+    window.addEventListener("recordingSaved", handleRecordingSaved);
+    return () => {
+      window.removeEventListener("recordingSaved", handleRecordingSaved);
+    };
   }, []);
 
   // Cleanup streams on unmount

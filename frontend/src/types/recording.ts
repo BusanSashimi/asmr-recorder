@@ -86,10 +86,10 @@ export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
   captureMic: true,
   captureSystemAudio: false,
   videoQuality: "medium",
-  frameRate: 15, // Lower frame rate for IPC performance
-  outputResolution: "hd1080",
-  outputWidth: 1920,
-  outputHeight: 1080,
+  frameRate: 60,
+  outputResolution: "qhd1440",
+  outputWidth: 2560,
+  outputHeight: 1440,
 };
 
 export function formatDuration(ms: number): string {
