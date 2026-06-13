@@ -1,6 +1,15 @@
 use std::time::Duration;
 use tauri::command;
 
+/// A sub-region of a display to capture (in display pixels).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct CaptureRegion {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Represents a captured screen frame
 #[derive(Clone)]
 pub struct ScreenFrame {
@@ -87,6 +96,8 @@ pub struct ScreenCaptureConfig {
     pub fps: u32,
     /// Display index to capture (0 = primary)
     pub display_index: usize,
+    /// Optional crop region in display pixels. None = full display.
+    pub region: Option<CaptureRegion>,
 }
 
 impl Default for ScreenCaptureConfig {
@@ -94,8 +105,20 @@ impl Default for ScreenCaptureConfig {
         Self {
             fps: 30,
             display_index: 0,
+            region: None,
         }
     }
+}
+
+/// Display information returned by list_displays.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayInfo {
+    pub index: usize,
+    pub display_id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -153,6 +176,66 @@ pub fn start_screen_capture() {
                 println!("Screen capture initialized (use new recording API for actual capture).");
             }
             Err(e) => println!("Failed to find primary display: {}", e),
+        }
+    }
+}
+
+/// Enumerate available displays.
+///
+/// macOS: returns all displays via SCShareableContent. Other platforms return a
+/// single synthetic entry for the primary display.
+#[command]
+pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        match screencapturekit::prelude::SCShareableContent::get() {
+            Ok(content) => {
+                let infos = content
+                    .displays()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, display)| {
+                        let frame = display.frame();
+                        DisplayInfo {
+                            index,
+                            display_id: display.display_id(),
+                            width: display.width(),
+                            height: display.height(),
+                            is_primary: frame.x == 0.0 && frame.y == 0.0,
+                        }
+                    })
+                    .collect();
+                Ok(infos)
+            }
+            Err(e) => Err(format!("Failed to access displays: {}", e)),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match windows_capture::monitor::Monitor::primary() {
+            Ok(m) => Ok(vec![DisplayInfo {
+                index: 0,
+                display_id: 0,
+                width: m.width().unwrap_or(1920),
+                height: m.height().unwrap_or(1080),
+                is_primary: true,
+            }]),
+            Err(e) => Err(format!("Failed to access displays: {}", e)),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        match scrap::Display::primary() {
+            Ok(d) => Ok(vec![DisplayInfo {
+                index: 0,
+                display_id: 0,
+                width: d.width() as u32,
+                height: d.height() as u32,
+                is_primary: true,
+            }]),
+            Err(e) => Err(format!("Failed to access displays: {}", e)),
         }
     }
 }

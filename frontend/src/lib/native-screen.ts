@@ -18,6 +18,15 @@ export interface ScreenStreamFrame {
   timestampMs: number;
 }
 
+/** Display information as returned by list_displays. */
+export interface DisplayInfo {
+  index: number;
+  displayId: number;
+  width: number;
+  height: number;
+  isPrimary: boolean;
+}
+
 export interface NativeScreenOptions {
   /** Display index to capture (0 = primary). */
   displayIndex?: number;
@@ -25,6 +34,8 @@ export interface NativeScreenOptions {
   fps?: number;
   /** Longest output dimension in px (frames are downscaled to fit). */
   maxDimension?: number;
+  /** Optional crop region in display pixels. Omit for full display. */
+  region?: { x: number; y: number; width: number; height: number };
 }
 
 /**
@@ -79,10 +90,16 @@ export async function startNativeScreenStream(
     displayIndex: opts.displayIndex ?? 0,
     fps: opts.fps ?? 30,
     maxDimension: opts.maxDimension ?? 1280,
+    region: opts.region ?? null,
     onFrame: channel,
   });
 
   return channel;
+}
+
+/** Enumerate available displays. Returns ≥1 entry; primary is first on macOS. */
+export async function listDisplays(): Promise<DisplayInfo[]> {
+  return invoke<DisplayInfo[]>("list_displays");
 }
 
 /** Stop the native screen stream for a section (no-op if none is running). */

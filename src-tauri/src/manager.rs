@@ -119,6 +119,7 @@ impl RecordingManager {
             let screen_config = ScreenCaptureConfig {
                 fps: config.frame_rate.unwrap_or(30),
                 display_index: 0,
+                region: None,
             };
             
             let screen_capture = ScreenCapture::new(screen_config)

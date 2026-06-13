@@ -117,12 +117,25 @@ impl ScreenCapture {
             .get(config.display_index)
             .ok_or_else(|| format!("Display {} not found", config.display_index))?;
 
+        let display_w = display.width();
+        let display_h = display.height();
+
+        // When a region is set, use its (clamped) dimensions for the frame buffer
+        // so downstream encode/composite sees region-sized frames — not full-display.
+        let (width, height) = if let Some(ref r) = config.region {
+            let w = r.width.min(display_w.saturating_sub(r.x)).max(1);
+            let h = r.height.min(display_h.saturating_sub(r.y)).max(1);
+            (w, h)
+        } else {
+            (display_w, display_h)
+        };
+
         let (sender, receiver) = bounded(FRAME_CHANNEL_CAPACITY);
 
         Ok(Self {
             config,
-            width: display.width(),
-            height: display.height(),
+            width,
+            height,
             running: Arc::new(Mutex::new(false)),
             frame_sender: Some(sender),
             frame_receiver: Some(receiver),
@@ -162,12 +175,27 @@ impl ScreenCapture {
             .build();
 
         let frame_interval = CMTime::new(1, self.config.fps as i32);
-        let stream_config = SCStreamConfiguration::new()
+        let base_config = SCStreamConfiguration::new()
             .with_width(self.width)
             .with_height(self.height)
             .with_pixel_format(PixelFormat::BGRA)
             .with_minimum_frame_interval(&frame_interval)
             .with_shows_cursor(true);
+
+        // Apply source_rect when a region is set — SCK crops natively.
+        // with_scales_to_fit(false) ensures a crop rather than a scaled view.
+        let stream_config = if let Some(ref r) = self.config.region {
+            base_config
+                .with_source_rect(CGRect::new(
+                    r.x as f64,
+                    r.y as f64,
+                    r.width as f64,
+                    r.height as f64,
+                ))
+                .with_scales_to_fit(false)
+        } else {
+            base_config
+        };
 
         let mut stream = SCStream::new(&filter, &stream_config);
 
@@ -193,8 +221,8 @@ impl ScreenCapture {
         *stream_guard = Some(stream);
 
         println!(
-            "Screen capture started: {}x{} @ {}fps",
-            self.width, self.height, self.config.fps
+            "Screen capture started: {}x{} @ {}fps region={:?}",
+            self.width, self.height, self.config.fps, self.config.region
         );
 
         Ok(())
