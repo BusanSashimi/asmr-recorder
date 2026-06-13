@@ -9,6 +9,9 @@ import { useEffect, useRef } from "react";
  */
 
 const DRAW_INTERVAL_MS = 33; // ~30fps — keep main-thread cost low during record
+// Waveform auto-scales to its recent peak so quiet ASMR input is still visible;
+// this floor caps the gain so silence/noise isn't amplified to full scale.
+const WAVEFORM_MIN_PEAK = 0.03; // ~ -30 dBFS
 const METER_FLOOR_DB = -60; // bottom of the meter scale
 const CLIP_THRESHOLD = 0.99; // linear peak that lights the clip indicator
 
@@ -135,14 +138,33 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
     const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
 
-    const W = canvas.width;
-    const H = canvas.height;
-    const buf = analyser ? new Uint8Array(analyser.fftSize) : null;
+    // Size the drawing buffer to the lane's actual pixel size (DPR-aware). A
+    // <canvas> defaults to a 300x150 buffer regardless of CSS, so without this
+    // the line is drawn off the visible area and the lane looks empty.
+    let W = 0;
+    let H = 0;
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const cw = canvas.clientWidth || 600;
+      const ch = canvas.clientHeight || 48;
+      canvas.width = Math.round(cw * dpr);
+      canvas.height = Math.round(ch * dpr);
+      W = canvas.width;
+      H = canvas.height;
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
+
+    const buf = analyser ? new Float32Array(analyser.fftSize) : null;
     let raf = 0;
     let last = 0;
+    let smoothedPeak = WAVEFORM_MIN_PEAK;
 
-    const drawIdle = () => {
+    const drawBase = () => {
       ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "rgba(34,197,94,0.05)"; // faint tint so the lane reads as a scope
+      ctx.fillRect(0, 0, W, H);
       ctx.strokeStyle = "#3f3f46";
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -152,8 +174,8 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
     };
 
     if (!analyser || !buf) {
-      drawIdle();
-      return;
+      drawBase();
+      return () => ro.disconnect();
     }
 
     const render = (t: number) => {
@@ -161,16 +183,28 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
       if (t - last < DRAW_INTERVAL_MS) return;
       last = t;
 
-      analyser.getByteTimeDomainData(buf);
-      ctx.clearRect(0, 0, W, H);
+      analyser.getFloatTimeDomainData(buf); // float [-1,1], 0 = silence
+
+      // Auto-gain: scale to the recent peak (fast attack, slow release) so the
+      // wave fills the lane at any level. Floored so silence stays small.
+      let maxAbs = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const a = Math.abs(buf[i]);
+        if (a > maxAbs) maxAbs = a;
+      }
+      smoothedPeak =
+        maxAbs > smoothedPeak
+          ? maxAbs
+          : Math.max(WAVEFORM_MIN_PEAK, smoothedPeak * 0.95);
+      const amp = (H / 2) * 0.85 / Math.max(smoothedPeak, WAVEFORM_MIN_PEAK);
+
+      drawBase();
       ctx.strokeStyle = "#22c55e";
-      ctx.lineWidth = 1;
+      ctx.lineWidth = Math.max(1, Math.round(window.devicePixelRatio || 1));
       ctx.beginPath();
       const step = W / buf.length;
       for (let i = 0; i < buf.length; i++) {
-        // getByteTimeDomainData: 0..255 with 128 = silence. Recenter explicitly
-        // so silence is always mid-height regardless of rounding.
-        const y = H / 2 + ((buf[i] - 128) / 128) * (H / 2);
+        const y = Math.max(0, Math.min(H, H / 2 - buf[i] * amp));
         const x = i * step;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
@@ -178,14 +212,15 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
       ctx.stroke();
     };
     raf = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, [analyser]);
 
   return (
     <canvas
       ref={canvasRef}
-      width={600}
-      height={48}
       className={className}
       title="Live input waveform"
     />

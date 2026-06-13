@@ -309,7 +309,7 @@ export function Timeline() {
                       {track.type === "audio" && (
                         <LiveWaveform
                           analyser={audioMonitor.analyserMix}
-                          className="absolute inset-0 h-full w-full opacity-70 pointer-events-none"
+                          className="absolute inset-0 block h-full w-full opacity-80 pointer-events-none"
                         />
                       )}
 
