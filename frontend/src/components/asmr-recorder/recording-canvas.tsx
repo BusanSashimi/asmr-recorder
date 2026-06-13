@@ -55,7 +55,10 @@ const RECORDING_SCALE = 1 / 1;
 // WebCodecs H.264 Baseline profile
 const H264_CODEC = "avc1.42001f";
 const VIDEO_BITRATE = 12_000_000;
-const KEYFRAME_INTERVAL = 120;
+// Emit a keyframe roughly once per second. A lossless trim can only start the
+// cut on a keyframe, so denser keyframes let the post-record editor snap the
+// cut-in point close to where the user drags (computed from fps in the loop).
+const KEYFRAME_INTERVAL_SECONDS = 1;
 // Backpressure: when the WebCodecs encoder has more than this many frames still
 // queued, skip the current composite+encode tick so the queue can't grow without
 // bound (and the main thread isn't loaded with work the encoder can't keep up with).
@@ -68,26 +71,6 @@ const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_NUM_CHANNELS = 2;
 const AUDIO_BITRATE = 256_000;
 const AAC_CODEC = "mp4a.40.2";
-
-/**
- * Convert an ArrayBuffer to a base64 string in chunks to avoid call stack limits.
- */
-const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
-  const uint8Array = new Uint8Array(buffer);
-  let binaryStr = "";
-  const chunkSize = 32768;
-  for (let i = 0; i < uint8Array.length; i += chunkSize) {
-    const chunk = uint8Array.subarray(
-      i,
-      Math.min(i + chunkSize, uint8Array.length),
-    );
-    binaryStr += String.fromCharCode.apply(
-      null,
-      chunk as unknown as number[],
-    );
-  }
-  return btoa(binaryStr);
-};
 
 /**
  * Extract the bare AudioSpecificConfig (ASC) from an AAC decoderConfig
@@ -429,20 +412,11 @@ export const RecordingCanvas = forwardRef<
    * Save recording data to the Tauri backend
    */
   const saveRecording = useCallback(
-    async (
-      data: ArrayBuffer,
-      width: number,
-      height: number,
-      mimeType: string,
-    ) => {
+    async (data: ArrayBuffer) => {
       try {
-        const base64Data = arrayBufferToBase64(data);
-        const savedPath = await invoke<string>("save_media_recording", {
-          videoData: base64Data,
-          width,
-          height,
-          mimeType,
-        });
+        // Send bytes as the raw IPC body (Tauri v2) instead of base64, so long
+        // recordings don't hit the JS max-string-length limit.
+        const savedPath = await invoke<string>("save_media_recording", data);
 
         console.log(`[Recording] Video saved: ${savedPath}`);
         window.dispatchEvent(
@@ -862,7 +836,7 @@ export const RecordingCanvas = forwardRef<
         const blob = new Blob(recordedChunksRef.current, { type: mimeType });
         console.log(`[MediaRecorder] Final video size: ${blob.size} bytes`);
         const buffer = await blob.arrayBuffer();
-        await saveRecording(buffer, width, height, mimeType);
+        await saveRecording(buffer);
       };
 
       recorder.onerror = (event) => {
@@ -922,8 +896,12 @@ export const RecordingCanvas = forwardRef<
             timestamp: timestampUs,
             duration: frameDurationUs,
           });
+          const keyframeIntervalFrames = Math.max(
+            1,
+            Math.round(frameRateRef.current * KEYFRAME_INTERVAL_SECONDS),
+          );
           const isKeyFrame =
-            frameCountRef.current % KEYFRAME_INTERVAL === 0;
+            frameCountRef.current % keyframeIntervalFrames === 0;
           encoder.encode(videoFrame, { keyFrame: isKeyFrame });
           videoFrame.close();
         }
@@ -1075,8 +1053,6 @@ export const RecordingCanvas = forwardRef<
         const audioEncoder = audioEncoderRef.current;
         const muxer = muxerRef.current;
         if (videoEncoder && muxer) {
-          const width = recordingWidthRef.current;
-          const height = recordingHeightRef.current;
           (async () => {
             try {
               await videoEncoder.flush();
@@ -1096,10 +1072,20 @@ export const RecordingCanvas = forwardRef<
 
               muxer.finalize();
               const mp4Buffer = muxer.target.buffer;
+              // Copy the bytes for the trim editor before saveRecording reads
+              // them. Only this WebCodecs/MP4 path emits the edit event — the
+              // MediaRecorder/WebM fallback doesn't — so the editor only ever
+              // opens for a seekable MP4.
+              const editBlob = new Blob([mp4Buffer], { type: "video/mp4" });
               console.log(
                 `[WebCodecs] MP4 finalized: ${mp4Buffer.byteLength} bytes (${muxedChunkCountRef.current} chunks)`,
               );
-              await saveRecording(mp4Buffer, width, height, "video/mp4");
+              await saveRecording(mp4Buffer);
+              window.dispatchEvent(
+                new CustomEvent("recordingReadyForEdit", {
+                  detail: { blob: editBlob },
+                }),
+              );
             } catch (error) {
               console.error(
                 "[WebCodecs] Error finalizing recording:",

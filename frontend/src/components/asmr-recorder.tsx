@@ -1,6 +1,7 @@
 import { Toolbar } from "./asmr-recorder/toolbar";
 import { Preview } from "./asmr-recorder/preview";
 import { Timeline } from "./asmr-recorder/timeline";
+import { TrimEditor } from "./asmr-recorder/trim-editor";
 import { Toaster } from "@/components/ui/toaster";
 import {
   RecordingProvider,
@@ -25,6 +26,9 @@ function ASMRRecorderContent() {
           <Timeline />
         </div>
       </div>
+
+      {/* Post-record trim editor — opens when a recording finishes */}
+      <TrimEditor />
 
       <Toaster />
     </div>
