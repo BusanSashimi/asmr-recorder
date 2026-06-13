@@ -19,7 +19,6 @@ interface Region {
 }
 
 const MIN_SIZE = 100;
-const HANDLE_SIZE = 12;
 
 export function RegionSelector({
   open,
