@@ -9,9 +9,7 @@ import { useEffect, useRef } from "react";
  */
 
 const DRAW_INTERVAL_MS = 33; // ~30fps — keep main-thread cost low during record
-// Waveform auto-scales to its recent peak so quiet ASMR input is still visible;
-// this floor caps the gain so silence/noise isn't amplified to full scale.
-const WAVEFORM_MIN_PEAK = 0.03; // ~ -30 dBFS
+const SPECTRUM_BARS = 56; // log-spaced FFT bars drawn across the lane
 const METER_FLOOR_DB = -60; // bottom of the meter scale
 const CLIP_THRESHOLD = 0.99; // linear peak that lights the clip indicator
 
@@ -123,13 +121,13 @@ export function StereoMeter({ analyserL, analyserR, className }: StereoMeterProp
   );
 }
 
-interface LiveWaveformProps {
+interface SpectrumProps {
   analyser: AnalyserNode | null;
   className?: string;
 }
 
-/** Live oscilloscope of the current mic input, stretched across the lane. */
-export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
+/** Log-frequency spectrum (FFT bars) of the current mic input. */
+export function Spectrum({ analyser, className }: SpectrumProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -140,15 +138,13 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
 
     // Size the drawing buffer to the lane's actual pixel size (DPR-aware). A
     // <canvas> defaults to a 300x150 buffer regardless of CSS, so without this
-    // the line is drawn off the visible area and the lane looks empty.
+    // the bars are drawn off the visible area and the lane looks empty.
     let W = 0;
     let H = 0;
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
-      const cw = canvas.clientWidth || 600;
-      const ch = canvas.clientHeight || 48;
-      canvas.width = Math.round(cw * dpr);
-      canvas.height = Math.round(ch * dpr);
+      canvas.width = Math.round((canvas.clientWidth || 600) * dpr);
+      canvas.height = Math.round((canvas.clientHeight || 48) * dpr);
       W = canvas.width;
       H = canvas.height;
     };
@@ -156,21 +152,12 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
-    const buf = analyser ? new Float32Array(analyser.fftSize) : null;
-    let raf = 0;
-    let last = 0;
-    let smoothedPeak = WAVEFORM_MIN_PEAK;
+    const buf = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
 
     const drawBase = () => {
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = "rgba(34,197,94,0.05)"; // faint tint so the lane reads as a scope
       ctx.fillRect(0, 0, W, H);
-      ctx.strokeStyle = "#3f3f46";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, H / 2);
-      ctx.lineTo(W, H / 2);
-      ctx.stroke();
     };
 
     if (!analyser || !buf) {
@@ -178,38 +165,40 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
       return () => ro.disconnect();
     }
 
+    // Log-spaced bin edges (skipping DC at bin 0) so low frequencies, where most
+    // ASMR energy lives, get more bars than the sparse high end.
+    const edges: number[] = [];
+    for (let i = 0; i <= SPECTRUM_BARS; i++) {
+      edges.push(
+        Math.min(buf.length, Math.floor(Math.pow(buf.length, i / SPECTRUM_BARS))),
+      );
+    }
+
+    let raf = 0;
+    let last = 0;
     const render = (t: number) => {
       raf = requestAnimationFrame(render);
       if (t - last < DRAW_INTERVAL_MS) return;
       last = t;
 
-      analyser.getFloatTimeDomainData(buf); // float [-1,1], 0 = silence
-
-      // Auto-gain: scale to the recent peak (fast attack, slow release) so the
-      // wave fills the lane at any level. Floored so silence stays small.
-      let maxAbs = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const a = Math.abs(buf[i]);
-        if (a > maxAbs) maxAbs = a;
-      }
-      smoothedPeak =
-        maxAbs > smoothedPeak
-          ? maxAbs
-          : Math.max(WAVEFORM_MIN_PEAK, smoothedPeak * 0.95);
-      const amp = (H / 2) * 0.85 / Math.max(smoothedPeak, WAVEFORM_MIN_PEAK);
-
+      analyser.getByteFrequencyData(buf); // 0..255, dB-scaled by the analyser
       drawBase();
-      ctx.strokeStyle = "#22c55e";
-      ctx.lineWidth = Math.max(1, Math.round(window.devicePixelRatio || 1));
-      ctx.beginPath();
-      const step = W / buf.length;
-      for (let i = 0; i < buf.length; i++) {
-        const y = Math.max(0, Math.min(H, H / 2 - buf[i] * amp));
-        const x = i * step;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+
+      const gap = Math.max(1, Math.round(window.devicePixelRatio || 1));
+      const barW = W / SPECTRUM_BARS;
+      for (let b = 0; b < SPECTRUM_BARS; b++) {
+        const lo = edges[b];
+        const hi = Math.max(lo + 1, edges[b + 1]);
+        let max = 0;
+        for (let k = lo; k < hi && k < buf.length; k++) {
+          if (buf[k] > max) max = buf[k];
+        }
+        const norm = max / 255;
+        const h = norm * H;
+        ctx.fillStyle =
+          norm > 0.85 ? "#ef4444" : norm > 0.6 ? "#f59e0b" : "#22c55e";
+        ctx.fillRect(b * barW, H - h, Math.max(1, barW - gap), h);
       }
-      ctx.stroke();
     };
     raf = requestAnimationFrame(render);
     return () => {
@@ -219,10 +208,6 @@ export function LiveWaveform({ analyser, className }: LiveWaveformProps) {
   }, [analyser]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      className={className}
-      title="Live input waveform"
-    />
+    <canvas ref={canvasRef} className={className} title="Live input spectrum" />
   );
 }

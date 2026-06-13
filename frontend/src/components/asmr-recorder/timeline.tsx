@@ -16,7 +16,7 @@ import {
   Monitor,
 } from "lucide-react"
 import { useRecordingContext } from "@/contexts/recording-context"
-import { StereoMeter, LiveWaveform } from "./audio-monitor-graphics"
+import { StereoMeter, Spectrum } from "./audio-monitor-graphics"
 
 interface Track {
   id: string
@@ -307,9 +307,9 @@ export function Timeline() {
                       className="h-12 border-b border-border relative bg-background"
                     >
                       {track.type === "audio" && (
-                        <LiveWaveform
+                        <Spectrum
                           analyser={audioMonitor.analyserMix}
-                          className="absolute inset-0 block h-full w-full opacity-80 pointer-events-none"
+                          className="absolute inset-0 block h-full w-full opacity-90 pointer-events-none"
                         />
                       )}
 

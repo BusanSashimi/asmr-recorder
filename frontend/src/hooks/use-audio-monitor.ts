@@ -112,10 +112,13 @@ export function useAudioMonitor(enabled: boolean): AudioMonitorState {
           );
         }
 
-        // Down-mixed analyser for the waveform.
+        // Down-mixed analyser for the spectrum. Smoothing steadies the bars;
+        // the dB window is tuned for quiet ASMR so bars aren't all near-zero.
         const analyserMix = ctx.createAnalyser();
         analyserMix.fftSize = 2048;
-        analyserMix.smoothingTimeConstant = 0;
+        analyserMix.smoothingTimeConstant = 0.8;
+        analyserMix.minDecibels = -90;
+        analyserMix.maxDecibels = -30;
         source.connect(analyserMix);
 
         // Pull the graph without making the mic audible (no feedback). A leaf
