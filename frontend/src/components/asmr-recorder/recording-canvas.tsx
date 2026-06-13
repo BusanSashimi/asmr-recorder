@@ -544,6 +544,24 @@ export const RecordingCanvas = forwardRef<
   );
 
   /**
+   * Get the recording AudioContext, creating it at the preferred sample rate if
+   * one isn't already live (acquireAudioTrack creates one for multi-stream
+   * mixing). WebKit may clamp the requested rate to the hardware rate, so
+   * callers must read the returned context's actual `sampleRate` and configure
+   * the encoder + muxer to match — that one rate keeps the AudioData, AAC
+   * config, and mp4a/esds boxes coherent (a mismatch yields a pitch-skewed or
+   * undecodable track).
+   */
+  const ensureAudioContext = useCallback(() => {
+    let audioCtx = audioContextRef.current;
+    if (!audioCtx || audioCtx.state === "closed") {
+      audioCtx = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
+      audioContextRef.current = audioCtx;
+    }
+    return audioCtx;
+  }, []);
+
+  /**
    * Capture raw audio samples from a MediaStreamTrack using Web Audio API
    * (ScriptProcessorNode) and feed AudioData frames into the AudioEncoder.
    *
@@ -553,26 +571,17 @@ export const RecordingCanvas = forwardRef<
   const startAudioProcessing = useCallback(
     (audioTrack: MediaStreamTrack, audioEncoder: AudioEncoder) => {
       try {
-        // Always use standard sample rate and stereo (AUDIO_NUM_CHANNELS) for
-        // encoding consistency. The AudioContext resamples from the mic's
-        // native rate automatically, and the ScriptProcessorNode below is
+        // Force stereo (AUDIO_NUM_CHANNELS): the ScriptProcessorNode below is
         // created with this channel count so inputBuffer.numberOfChannels
-        // always matches the encoder/muxer config.
-        const sampleRate = AUDIO_SAMPLE_RATE;
+        // always matches the encoder/muxer config (mono mics are upmixed).
         const channelCount = AUDIO_NUM_CHANNELS;
 
-        let audioCtx = audioContextRef.current;
-        if (!audioCtx || audioCtx.state === "closed") {
-          audioCtx = new AudioContext({ sampleRate });
-          audioContextRef.current = audioCtx;
-        }
-
-        // If the existing AudioContext has a different sample rate, recreate it
-        if (audioCtx.sampleRate !== sampleRate) {
-          audioCtx.close().catch(() => {});
-          audioCtx = new AudioContext({ sampleRate });
-          audioContextRef.current = audioCtx;
-        }
+        // Reuse the AudioContext established by initializeWebCodecs (or the
+        // multi-stream mixing context from acquireAudioTrack). Its actual sample
+        // rate is what the encoder + muxer were configured with, so we must NOT
+        // recreate it here — recreating could re-clamp to a different rate and
+        // desync the AudioData from the encoder (pitch-skew / undecodable track).
+        const audioCtx = ensureAudioContext();
 
         const source = audioCtx.createMediaStreamSource(
           new MediaStream([audioTrack]),
@@ -638,13 +647,13 @@ export const RecordingCanvas = forwardRef<
         };
 
         console.log(
-          `[Audio] Started audio processing: ${channelCount}ch @ ${sampleRate}Hz, buffer=${bufferSize}`,
+          `[Audio] Started audio processing: ${channelCount}ch @ ${audioCtx.sampleRate}Hz, buffer=${bufferSize}`,
         );
       } catch (error) {
         console.warn("[Audio] Failed to start audio processing:", error);
       }
     },
-    [],
+    [ensureAudioContext],
   );
 
   /**
@@ -660,17 +669,108 @@ export const RecordingCanvas = forwardRef<
     ): boolean => {
       if (typeof VideoEncoder === "undefined") return false;
 
+      // Declared outside the try so the outer catch (the WebM fallback, which a
+      // VIDEO failure triggers) can close an already-configured audio encoder —
+      // otherwise resolving audio before video below would orphan it.
+      let audioEncoder: AudioEncoder | null = null;
+
       try {
+        // Resolve audio BEFORE building the muxer/encoder so the AudioContext's
+        // actual sample rate (WebKit may clamp the requested 48k to the hardware
+        // rate) drives both the AAC encoder AND the muxer's mp4a/esds boxes,
+        // keeping the AudioData, encoder, and container coherent. Audio setup is
+        // isolated in its own try: if it fails we record a video-only MP4 rather
+        // than tearing the whole (verified) WebCodecs path down into a WebM
+        // fallback.
+        let audioSampleRate = AUDIO_SAMPLE_RATE;
+        if (audioTrack) {
+          try {
+            audioSampleRate = ensureAudioContext().sampleRate;
+            if (audioSampleRate !== AUDIO_SAMPLE_RATE) {
+              console.warn(
+                `[WebCodecs] AudioContext clamped to ${audioSampleRate}Hz (requested ${AUDIO_SAMPLE_RATE}); configuring encoder + muxer to match.`,
+              );
+            }
+
+            audioEncoder = new AudioEncoder({
+              // Fires during encoding, after `muxer` below has been assigned.
+              output: (chunk, metadata) => {
+                try {
+                  // WKWebView/Safari hands a full ES_Descriptor as the
+                  // description; pass mp4-muxer the bare ASC so the esds isn't
+                  // double-wrapped (which makes the audio track undecodable).
+                  const dc = metadata?.decoderConfig;
+                  const asc = dc?.description
+                    ? extractAudioSpecificConfig(dc.description)
+                    : null;
+                  if (dc && asc) {
+                    muxer.addAudioChunk(chunk, {
+                      ...metadata,
+                      decoderConfig: { ...dc, description: asc },
+                    });
+                  } else {
+                    muxer.addAudioChunk(chunk, metadata);
+                  }
+                } catch (error) {
+                  console.error(
+                    "[WebCodecs] Failed to mux audio chunk:",
+                    error,
+                  );
+                }
+              },
+              error: (error) => {
+                console.error("[AudioEncoder] Error:", error);
+              },
+            });
+
+            // WebKit's AAC encoder defaults to VBR, which treats `bitrate` as a
+            // loose ceiling and encodes quiet ASMR content far below it (~80-130k
+            // observed vs the 256k requested). Request CBR so the configured rate
+            // is actually used; fall back to the default mode if CBR is rejected.
+            const baseAudioConfig: AudioEncoderConfig = {
+              codec: AAC_CODEC,
+              numberOfChannels: AUDIO_NUM_CHANNELS,
+              sampleRate: audioSampleRate,
+              bitrate: AUDIO_BITRATE,
+            };
+            try {
+              audioEncoder.configure({
+                ...baseAudioConfig,
+                bitrateMode: "constant",
+              });
+            } catch (cbrError) {
+              console.warn(
+                "[WebCodecs] CBR audio config rejected; using default bitrate mode:",
+                cbrError,
+              );
+              audioEncoder.configure(baseAudioConfig);
+            }
+          } catch (audioError) {
+            // An audio-only failure must not kill the (verified) video path.
+            console.warn(
+              "[WebCodecs] Audio setup failed; recording video-only MP4:",
+              audioError,
+            );
+            try {
+              audioEncoder?.close();
+            } catch {
+              /* encoder may be unconfigured; ignore */
+            }
+            audioEncoder = null;
+          }
+        }
+        const hasAudio = audioEncoder !== null;
+
         const target = new ArrayBufferTarget();
 
         const muxer = new Muxer({
           target,
           video: { codec: "avc", width, height },
-          ...(audioTrack && {
+          ...(hasAudio && {
             audio: {
               codec: "aac" as const,
               numberOfChannels: AUDIO_NUM_CHANNELS,
-              sampleRate: AUDIO_SAMPLE_RATE,
+              sampleRate: audioSampleRate,
             },
           }),
           fastStart: "in-memory",
@@ -702,69 +802,11 @@ export const RecordingCanvas = forwardRef<
           latencyMode: "realtime",
         });
 
-        if (audioTrack) {
-          const numberOfChannels = AUDIO_NUM_CHANNELS;
-          const sampleRate = AUDIO_SAMPLE_RATE;
-
-          const audioEncoder = new AudioEncoder({
-            output: (chunk, metadata) => {
-              try {
-                // WKWebView/Safari hands a full ES_Descriptor as the
-                // description; pass mp4-muxer the bare ASC so the esds isn't
-                // double-wrapped (which makes the audio track undecodable).
-                const dc = metadata?.decoderConfig;
-                const asc = dc?.description
-                  ? extractAudioSpecificConfig(dc.description)
-                  : null;
-                if (dc && asc) {
-                  muxer.addAudioChunk(chunk, {
-                    ...metadata,
-                    decoderConfig: { ...dc, description: asc },
-                  });
-                } else {
-                  muxer.addAudioChunk(chunk, metadata);
-                }
-              } catch (error) {
-                console.error(
-                  "[WebCodecs] Failed to mux audio chunk:",
-                  error,
-                );
-              }
-            },
-            error: (error) => {
-              console.error("[AudioEncoder] Error:", error);
-            },
-          });
-
-          // WebKit's AAC encoder defaults to VBR, which treats `bitrate` as a
-          // loose ceiling and encodes quiet ASMR content far below it (~80-130k
-          // observed vs the 256k requested). Request CBR so the configured rate
-          // is actually used; fall back to the default mode if CBR is rejected,
-          // so this can never break the (verified) audio path.
-          const baseAudioConfig: AudioEncoderConfig = {
-            codec: AAC_CODEC,
-            numberOfChannels,
-            sampleRate,
-            bitrate: AUDIO_BITRATE,
-          };
-          try {
-            audioEncoder.configure({
-              ...baseAudioConfig,
-              bitrateMode: "constant",
-            });
-          } catch (cbrError) {
-            console.warn(
-              "[WebCodecs] CBR audio config rejected; using default bitrate mode:",
-              cbrError,
-            );
-            audioEncoder.configure(baseAudioConfig);
-          }
-
+        if (audioEncoder && audioTrack) {
           audioEncoderRef.current = audioEncoder;
           startAudioProcessing(audioTrack, audioEncoder);
-
           console.log(
-            `[WebCodecs] Audio encoder initialized: ${numberOfChannels}ch @ ${sampleRate}Hz`,
+            `[WebCodecs] Audio encoder initialized: ${AUDIO_NUM_CHANNELS}ch @ ${audioSampleRate}Hz`,
           );
         }
 
@@ -774,7 +816,7 @@ export const RecordingCanvas = forwardRef<
         muxedChunkCountRef.current = 0;
 
         console.log(
-          `[WebCodecs] Initialized: ${width}x${height} @ ${fps}fps, H.264 -> MP4${audioTrack ? " + AAC audio" : ""}`,
+          `[WebCodecs] Initialized: ${width}x${height} @ ${fps}fps, H.264 -> MP4${hasAudio ? " + AAC audio" : ""}`,
         );
         return true;
       } catch (error) {
@@ -782,6 +824,14 @@ export const RecordingCanvas = forwardRef<
           "[WebCodecs] Failed to initialize, falling back to MediaRecorder:",
           error,
         );
+        // A video failure can land here after the audio encoder was already
+        // configured; close it so it isn't orphaned (audioEncoderRef may not be
+        // assigned yet, so teardown wouldn't catch it).
+        try {
+          audioEncoder?.close();
+        } catch {
+          /* may be unconfigured/closed; ignore */
+        }
         videoEncoderRef.current = null;
         audioEncoderRef.current = null;
         muxerRef.current = null;
@@ -789,7 +839,7 @@ export const RecordingCanvas = forwardRef<
         return false;
       }
     },
-    [startAudioProcessing],
+    [startAudioProcessing, ensureAudioContext],
   );
 
   /**
