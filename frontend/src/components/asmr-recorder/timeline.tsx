@@ -15,6 +15,8 @@ import {
   Mic,
   Monitor,
 } from "lucide-react"
+import { useRecordingContext } from "@/contexts/recording-context"
+import { StereoMeter, LiveWaveform } from "./audio-monitor-graphics"
 
 interface Track {
   id: string
@@ -49,6 +51,8 @@ export function Timeline() {
       clips: [],
     },
   ])
+
+  const { audioMonitor } = useRecordingContext()
 
   const minZoom = 0.25
   const maxZoom = 4
@@ -234,6 +238,14 @@ export function Timeline() {
 
                     <span className="text-sm flex-1 truncate">{track.name}</span>
 
+                    {track.type === "audio" && (
+                      <StereoMeter
+                        analyserL={audioMonitor.analyserL}
+                        analyserR={audioMonitor.analyserR}
+                        className="flex-shrink-0 rounded-sm"
+                      />
+                    )}
+
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <Button
                         variant="ghost"
@@ -294,6 +306,13 @@ export function Timeline() {
                       key={track.id}
                       className="h-12 border-b border-border relative bg-background"
                     >
+                      {track.type === "audio" && (
+                        <LiveWaveform
+                          analyser={audioMonitor.analyserMix}
+                          className="absolute inset-0 h-full w-full opacity-70 pointer-events-none"
+                        />
+                      )}
+
                       {track.clips.map((clip) => (
                         <div
                           key={clip.id}

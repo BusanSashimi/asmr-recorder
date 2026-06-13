@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useCallback, useEffect, use
 import { invoke } from "@tauri-apps/api/core";
 import { defaultRecordingConfig, defaultSectionState, defaultExternalRecordingConfig, OUTPUT_RESOLUTIONS } from "@/types/recording";
 import { hasMediaApi } from "@/lib/utils";
+import { useAudioMonitor, type AudioMonitorState } from "@/hooks/use-audio-monitor";
 import type { 
   RecordingConfig, 
   RecordingStatus, 
@@ -36,6 +37,8 @@ interface RecordingContextValue {
   isExternalRecording: boolean;
   startExternalRecording: () => Promise<void>;
   stopExternalRecording: () => Promise<string>;
+  // Live microphone monitor (active whenever externalConfig.captureMic is on)
+  audioMonitor: AudioMonitorState;
 }
 
 const RecordingContext = createContext<RecordingContextValue | null>(null);
@@ -59,6 +62,11 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [externalConfig, setExternalConfig] = useState<ExternalRecordingConfig>(defaultExternalRecordingConfig);
   const [isExternalRecording, setIsExternalRecording] = useState(false);
   const recordingStartTimeRef = useRef<number>(0);
+
+  // Live mic monitor for the timeline's Audio Track section. Decoupled from the
+  // recording pipeline (recording-canvas opens its own mic); active while the
+  // mic source is enabled so levels are visible before and during recording.
+  const audioMonitor = useAudioMonitor(externalConfig.captureMic);
 
   // Fetch available devices from Tauri backend
   const fetchDevices = useCallback(async () => {
@@ -341,6 +349,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     isExternalRecording,
     startExternalRecording,
     stopExternalRecording,
+    audioMonitor,
   };
 
   return (
