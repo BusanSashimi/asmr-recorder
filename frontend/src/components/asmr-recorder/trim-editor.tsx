@@ -2,18 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import { Play, Pause, Scissors, Loader2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  Input,
-  Output,
-  BlobSource,
-  BufferTarget,
-  Mp4OutputFormat,
-  ALL_FORMATS,
-  EncodedPacketSink,
-  EncodedVideoPacketSource,
-  EncodedAudioPacketSource,
-  EncodedPacket,
-} from "mediabunny";
+import type { Input, EncodedPacketSink, EncodedPacket } from "mediabunny";
 import {
   Dialog,
   DialogContent,
@@ -47,25 +36,26 @@ async function trimToBuffer(
   inSec: number,
   outSec: number,
 ): Promise<ArrayBuffer> {
+  const mb = await import("mediabunny");
   const videoTrack = await input.getPrimaryVideoTrack();
   if (!videoTrack?.codec) throw new Error("No supported video track found");
   const audioTrack = await input.getPrimaryAudioTrack();
   const audioCodec = audioTrack?.codec ?? null;
 
-  const output = new Output({
-    format: new Mp4OutputFormat({ fastStart: "in-memory" }),
-    target: new BufferTarget(),
+  const output = new mb.Output({
+    format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }),
+    target: new mb.BufferTarget(),
   });
-  const videoSource = new EncodedVideoPacketSource(videoTrack.codec);
+  const videoSource = new mb.EncodedVideoPacketSource(videoTrack.codec);
   output.addVideoTrack(videoSource);
   const audioSource = audioCodec
-    ? new EncodedAudioPacketSource(audioCodec)
+    ? new mb.EncodedAudioPacketSource(audioCodec)
     : null;
   if (audioSource) output.addAudioTrack(audioSource);
 
   await output.start();
 
-  const videoSink = new EncodedPacketSink(videoTrack);
+  const videoSink = new mb.EncodedPacketSink(videoTrack);
   const startKey = await videoSink.getKeyPacket(inSec, {
     verifyKeyPackets: true,
   });
@@ -76,7 +66,7 @@ async function trimToBuffer(
   // use the minimum of the two as the origin to keep A/V aligned and avoid
   // negative timestamps (which the muxer rejects).
   let origin = startKey.timestamp;
-  const audioSink = audioTrack ? new EncodedPacketSink(audioTrack) : null;
+  const audioSink = audioTrack ? new mb.EncodedPacketSink(audioTrack) : null;
   let audioStart: EncodedPacket | null = null;
   if (audioSink) {
     audioStart = await audioSink.getPacket(startKey.timestamp);
@@ -90,7 +80,7 @@ async function trimToBuffer(
   for await (const p of videoSink.packets(startKey)) {
     if (p.timestamp > outSec) break;
     await videoSource.add(
-      new EncodedPacket(
+      new mb.EncodedPacket(
         p.data,
         p.type,
         p.timestamp - origin,
@@ -110,7 +100,7 @@ async function trimToBuffer(
     for await (const p of audioSink.packets(audioStart)) {
       if (p.timestamp > outSec) break;
       await audioSource.add(
-        new EncodedPacket(
+        new mb.EncodedPacket(
           p.data,
           p.type,
           p.timestamp - origin,
@@ -183,23 +173,30 @@ export function TrimEditor() {
   }, []);
 
   // Build a Mediabunny Input from the blob for keyframe lookups + export.
+  // Mediabunny is loaded lazily (dynamic import) so it doesn't land in the
+  // initial JS bundle. The `cancelled` flag guards against the effect tearing
+  // down before the import resolves.
   useEffect(() => {
     if (!blob) return;
-    const input = new Input({
-      formats: ALL_FORMATS,
-      source: new BlobSource(blob),
-    });
-    inputRef.current = input;
-    input
-      .getPrimaryVideoTrack()
-      .then((track) => {
-        if (track) videoSinkRef.current = new EncodedPacketSink(track);
-      })
-      .catch(() => {
-        /* validity is surfaced at export time */
+    let cancelled = false;
+    import("mediabunny").then((mb) => {
+      if (cancelled) return;
+      const input = new mb.Input({
+        formats: mb.ALL_FORMATS,
+        source: new mb.BlobSource(blob),
       });
-
+      inputRef.current = input;
+      input
+        .getPrimaryVideoTrack()
+        .then((track) => {
+          if (!cancelled && track) videoSinkRef.current = new mb.EncodedPacketSink(track);
+        })
+        .catch(() => {
+          /* validity is surfaced at export time */
+        });
+    });
     return () => {
+      cancelled = true;
       inputRef.current = null;
       videoSinkRef.current = null;
     };

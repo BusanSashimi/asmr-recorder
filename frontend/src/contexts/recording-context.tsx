@@ -92,7 +92,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     try {
       // Request permission first to get full device info
       if (hasMediaApi("getUserMedia")) {
-        await navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+        await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
           stream.getTracks().forEach(track => track.stop());
         }).catch(() => {
           // Permission denied, continue with limited device info

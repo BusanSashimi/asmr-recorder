@@ -8,11 +8,11 @@ export function cn(...inputs: ClassValue[]) {
 /**
  * Whether a given navigator.mediaDevices method is usable in this webview.
  *
- * In Tauri's WKWebView, navigator.mediaDevices is frequently undefined
- * (especially in dev over http://localhost, which is not treated as a secure
- * context), and getDisplayMedia is unsupported even when mediaDevices exists.
- * Every browser-capture call must be guarded so a missing API surfaces a clear
- * message instead of a raw "undefined is not an object" TypeError.
+ * Verified behaviour in Tauri's WKWebView (2026-06-13): getUserMedia and
+ * enumerateDevices work (mic capture confirmed in live recordings); only
+ * getDisplayMedia is absent — screen capture goes through the native SCK path.
+ * Every browser-capture call should be guarded so a missing API surfaces a
+ * clear message instead of a raw TypeError.
  */
 export function hasMediaApi(
   method: 'getUserMedia' | 'getDisplayMedia' | 'enumerateDevices',
