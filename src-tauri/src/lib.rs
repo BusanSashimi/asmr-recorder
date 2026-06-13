@@ -200,6 +200,7 @@ pub fn run() {
             // Native screen capture streaming (WKWebView lacks getDisplayMedia)
             screen_stream::start_screen_stream,
             screen_stream::stop_screen_stream,
+            screen_stream::ack_screen_frame,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -31,7 +31,6 @@ import {
   startNativeScreenStream,
   stopNativeScreenStream,
   listDisplays,
-  type ScreenStreamFrame,
   type DisplayInfo,
 } from "@/lib/native-screen";
 import type { Channel } from "@tauri-apps/api/core";
@@ -86,7 +85,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
   // Native screen capture (WKWebView has no getDisplayMedia): a per-section
   // Tauri Channel streaming JPEG frames, drawn into a per-section canvas.
   const nativeScreenChannels = useRef<{
-    [key: number]: Channel<ScreenStreamFrame> | null;
+    [key: number]: Channel<ArrayBuffer> | null;
   }>({});
   const nativeCanvasRefs = useRef<SectionCanvasRef>({});
 
@@ -408,7 +407,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
           {
             displayIndex,
             region,
-            fps: Math.min(externalConfig.frameRate || 30, 30),
+            fps: externalConfig.frameRate || 30,
             maxDimension: Math.ceil(externalConfig.outputWidth / 2),
           },
         ).then((channel) => {
