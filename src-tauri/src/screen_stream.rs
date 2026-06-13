@@ -14,11 +14,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, ExtendedColorType, ImageBuffer, RgbaImage};
-use parking_lot::Mutex;
-use serde::Serialize;
-use tauri::ipc::Channel;
+use parking_lot::{Condvar, Mutex};
+use tauri::ipc::{Channel, InvokeResponseBody};
 
 use crate::screen::{CaptureRegion, ScreenCapture, ScreenCaptureConfig};
 
@@ -27,24 +25,15 @@ const JPEG_QUALITY: u8 = 80;
 /// How long the worker waits for a frame before re-checking the stop flag.
 /// Kept short so stop()/replacement observes the flag (and returns) promptly.
 const RECV_TIMEOUT: Duration = Duration::from_millis(100);
-
-/// A single streamed screen frame delivered to the frontend over a Channel.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScreenStreamFrame {
-    /// Base64-encoded JPEG image data.
-    pub data: String,
-    /// Frame width in pixels (after downscaling).
-    pub width: u32,
-    /// Frame height in pixels (after downscaling).
-    pub height: u32,
-    /// Capture timestamp in milliseconds since the stream started.
-    pub timestamp_ms: u64,
-}
+/// Maximum frames in flight from worker to JS decoder at once (ack-based backpressure).
+const MAX_INFLIGHT: u32 = 2;
 
 struct StreamHandle {
     running: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    /// Ack-based backpressure credit shared with the worker. ack_screen_frame
+    /// increments it; the worker decrements before each Channel::send.
+    credit: Arc<(Mutex<u32>, Condvar)>,
 }
 
 impl StreamHandle {
@@ -120,7 +109,7 @@ pub async fn start_screen_stream(
     fps: u32,
     max_dimension: u32,
     region: Option<CaptureRegion>,
-    on_frame: Channel<ScreenStreamFrame>,
+    on_frame: Channel<InvokeResponseBody>,
     state: tauri::State<'_, Arc<ScreenStreamState>>,
 ) -> Result<(), String> {
     // Stop any existing stream for this section before starting a new one.
@@ -149,6 +138,9 @@ pub async fn start_screen_stream(
 
     let running = Arc::new(AtomicBool::new(true));
     let worker_running = running.clone();
+
+    let credit = Arc::new((Mutex::new(MAX_INFLIGHT), Condvar::new()));
+    let worker_credit = credit.clone();
 
     let worker = std::thread::spawn(move || {
         // `capture` is moved in so the SCStream stays alive for the worker's lifetime
@@ -182,13 +174,26 @@ pub async fn start_screen_stream(
 
             match encode_frame(rgba, src_w, src_h, max_dimension) {
                 Ok((jpeg, width, height)) => {
-                    let frame = ScreenStreamFrame {
-                        data: STANDARD.encode(&jpeg),
-                        width,
-                        height,
-                        timestamp_ms,
-                    };
-                    if on_frame.send(frame).is_err() {
+                    // 16-byte LE header: u32 width, u32 height, u64 timestamp_ms
+                    let mut payload = Vec::with_capacity(16 + jpeg.len());
+                    payload.extend_from_slice(&width.to_le_bytes());
+                    payload.extend_from_slice(&height.to_le_bytes());
+                    payload.extend_from_slice(&timestamp_ms.to_le_bytes());
+                    payload.extend_from_slice(&jpeg);
+
+                    // Block until the JS decoder has capacity (ack-based backpressure).
+                    // wait_for uses RECV_TIMEOUT so a stopped frontend never deadlocks.
+                    {
+                        let (m, cv) = &*worker_credit;
+                        let mut c = m.lock();
+                        while *c == 0 && worker_running.load(Ordering::Relaxed) {
+                            cv.wait_for(&mut c, RECV_TIMEOUT);
+                        }
+                        if !worker_running.load(Ordering::Relaxed) { break; }
+                        *c -= 1;
+                    }
+
+                    if on_frame.send(InvokeResponseBody::Raw(payload)).is_err() {
                         // Frontend dropped the channel — stop streaming.
                         break;
                     }
@@ -217,6 +222,7 @@ pub async fn start_screen_stream(
         StreamHandle {
             running,
             worker: Some(worker),
+            credit,
         },
     );
     if let Some(replaced) = replaced {
@@ -242,4 +248,23 @@ pub async fn stop_screen_stream(
         handle.stop();
     }
     Ok(())
+}
+
+/// Acknowledge a delivered frame, restoring one unit of backpressure credit.
+///
+/// Called by the frontend after each `createImageBitmap` resolves. Always call
+/// this (even on decode failure) so a single bad frame can't starve the worker.
+#[tauri::command]
+pub fn ack_screen_frame(
+    section_index: u32,
+    state: tauri::State<'_, Arc<ScreenStreamState>>,
+) {
+    if let Some(h) = state.streams.lock().get(&section_index) {
+        let (m, cv) = &*h.credit;
+        let mut c = m.lock();
+        if *c < MAX_INFLIGHT {
+            *c += 1;
+            cv.notify_one();
+        }
+    }
 }
