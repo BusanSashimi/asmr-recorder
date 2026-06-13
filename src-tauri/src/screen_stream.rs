@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::ipc::Channel;
 
-use crate::screen::{ScreenCapture, ScreenCaptureConfig};
+use crate::screen::{CaptureRegion, ScreenCapture, ScreenCaptureConfig};
 
 /// JPEG quality (0-100) for streamed preview/composite frames.
 const JPEG_QUALITY: u8 = 80;
@@ -119,6 +119,7 @@ pub async fn start_screen_stream(
     display_index: usize,
     fps: u32,
     max_dimension: u32,
+    region: Option<CaptureRegion>,
     on_frame: Channel<ScreenStreamFrame>,
     state: tauri::State<'_, Arc<ScreenStreamState>>,
 ) -> Result<(), String> {
@@ -130,7 +131,7 @@ pub async fn start_screen_stream(
         existing.stop();
     }
 
-    let mut capture = ScreenCapture::new(ScreenCaptureConfig { fps, display_index })
+    let mut capture = ScreenCapture::new(ScreenCaptureConfig { fps, display_index, region })
         .map_err(|e| {
             let lower = e.to_lowercase();
             if lower.contains("permission") || lower.contains("screen recording") {

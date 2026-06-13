@@ -182,6 +182,7 @@ pub fn run() {
             audio::start_audio_capture,
             screen::start_screen_capture,
             screen::check_screen_recording_permission,
+            screen::list_displays,
             // New unified recording commands
             recording::get_available_devices,
             recording::get_recording_status,

@@ -16,6 +16,13 @@ import {
 import { RecordModal } from "./record-modal";
 import { CameraSelectModal } from "./camera-select-modal";
 import { RegionSelector } from "./region-selector";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { RecordingCanvas } from "./recording-canvas";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { toast } from "@/hooks/use-toast";
@@ -23,7 +30,9 @@ import { hasMediaApi } from "@/lib/utils";
 import {
   startNativeScreenStream,
   stopNativeScreenStream,
+  listDisplays,
   type ScreenStreamFrame,
+  type DisplayInfo,
 } from "@/lib/native-screen";
 import type { Channel } from "@tauri-apps/api/core";
 import type { ScreenRegion } from "@/types/recording";
@@ -63,6 +72,11 @@ export function Preview({ isRecording = false }: PreviewProps) {
     width: 1920,
     height: 1080,
   });
+  const [showDisplayPicker, setShowDisplayPicker] = useState(false);
+  const [availableDisplays, setAvailableDisplays] = useState<DisplayInfo[]>([]);
+  // Tracks a pending native-screen region selection (index + chosen display).
+  // Set before opening RegionSelector for the native path; cleared on confirm/cancel.
+  const nativeRegionPendingRef = useRef<{ index: number; displayIndex: number } | null>(null);
 
   const videoRefs = useRef<SectionVideoRef>({});
   const canvasRefs = useRef<SectionCanvasRef>({});
@@ -222,55 +236,27 @@ export function Preview({ isRecording = false }: PreviewProps) {
       stopNativeScreenStream(index);
       nativeScreenChannels.current[index] = null;
       nativeCanvasRefs.current[index] = null;
+      sectionRegions.current[index] = null;
     }
   }, []);
 
-  // Start native screen capture for a section (WKWebView path). Streams JPEG
-  // frames from the backend into the section's canvas, which feeds the composite.
+  // Start native screen capture for a section (WKWebView path).
+  // Shows a display picker when >1 display exists, then opens RegionSelector
+  // so the user can choose a crop. The actual stream starts in handleRegionConfirm.
   const startNativeScreen = useCallback(
     async (index: number) => {
       try {
-        if (nativeScreenChannels.current[index]) {
-          await stopNativeScreenStream(index);
-          nativeScreenChannels.current[index] = null;
+        const displays = await listDisplays();
+        if (displays.length > 1) {
+          setAvailableDisplays(displays);
+          nativeRegionPendingRef.current = { index, displayIndex: 0 };
+          setShowDisplayPicker(true);
+        } else {
+          const d = displays[0] ?? { width: 1920, height: 1080 };
+          nativeRegionPendingRef.current = { index, displayIndex: 0 };
+          setScreenDimensions({ width: d.width, height: d.height });
+          setShowRegionSelector(true);
         }
-
-        const channel = await startNativeScreenStream(
-          index,
-          (bitmap) => {
-            const canvas = nativeCanvasRefs.current[index];
-            if (!canvas) {
-              bitmap.close();
-              return;
-            }
-            if (
-              canvas.width !== bitmap.width ||
-              canvas.height !== bitmap.height
-            ) {
-              canvas.width = bitmap.width;
-              canvas.height = bitmap.height;
-            }
-            const ctx = canvas.getContext("2d");
-            if (ctx) ctx.drawImage(bitmap, 0, 0);
-            bitmap.close();
-          },
-          {
-            // Cap native screen at 30fps: each frame is decoded (JPEG ->
-            // ImageBitmap) on the main thread, which competes with the composite/
-            // encode loop. 30 is plenty for a downscaled screen quadrant.
-            fps: Math.min(externalConfig.frameRate || 30, 30),
-            // A 2x2 grid quadrant is half the output width; cap frames to that.
-            maxDimension: Math.ceil(externalConfig.outputWidth / 2),
-          },
-        );
-
-        nativeScreenChannels.current[index] = channel;
-        setSectionSource(index, "screen", undefined, "Screen (native)");
-
-        toast({
-          title: "Screen capture started",
-          description: `Native display capture in section ${index + 1}`,
-        });
       } catch (err) {
         toast({
           title: "Screen capture failed",
@@ -279,8 +265,27 @@ export function Preview({ isRecording = false }: PreviewProps) {
         });
       }
     },
-    [externalConfig.frameRate, externalConfig.outputWidth, setSectionSource],
+    [],
   );
+
+  const handleDisplayConfirm = useCallback(
+    (displayIndex: number) => {
+      if (!nativeRegionPendingRef.current) return;
+      nativeRegionPendingRef.current = { ...nativeRegionPendingRef.current, displayIndex };
+      const display = availableDisplays[displayIndex];
+      if (display) {
+        setScreenDimensions({ width: display.width, height: display.height });
+      }
+      setShowDisplayPicker(false);
+      setShowRegionSelector(true);
+    },
+    [availableDisplays],
+  );
+
+  const handleDisplayPickerClose = useCallback(() => {
+    nativeRegionPendingRef.current = null;
+    setShowDisplayPicker(false);
+  }, []);
 
   // Start canvas rendering loop for cropped video
   const startCanvasRendering = useCallback(
@@ -377,6 +382,55 @@ export function Preview({ isRecording = false }: PreviewProps) {
 
   const handleRegionConfirm = useCallback(
     (region: ScreenRegion) => {
+      // Native path: RegionSelector was opened by startNativeScreen
+      if (nativeRegionPendingRef.current) {
+        const { index, displayIndex } = nativeRegionPendingRef.current;
+        nativeRegionPendingRef.current = null;
+        stopNativeStreamForSection(index);
+        sectionRegions.current[index] = region;
+        const regionLabel =
+          region.width === screenDimensions.width && region.height === screenDimensions.height
+            ? "Full Screen"
+            : `Region (${region.width}×${region.height})`;
+        startNativeScreenStream(
+          index,
+          (bitmap) => {
+            const canvas = nativeCanvasRefs.current[index];
+            if (!canvas) { bitmap.close(); return; }
+            if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+              canvas.width = bitmap.width;
+              canvas.height = bitmap.height;
+            }
+            const ctx = canvas.getContext("2d");
+            if (ctx) ctx.drawImage(bitmap, 0, 0);
+            bitmap.close();
+          },
+          {
+            displayIndex,
+            region,
+            fps: Math.min(externalConfig.frameRate || 30, 30),
+            maxDimension: Math.ceil(externalConfig.outputWidth / 2),
+          },
+        ).then((channel) => {
+          nativeScreenChannels.current[index] = channel;
+          setSectionSource(index, "screen", undefined, regionLabel);
+          toast({
+            title: "Screen capture started",
+            description: `Native ${regionLabel.toLowerCase()} in section ${index + 1}`,
+          });
+        }).catch((err: unknown) => {
+          sectionRegions.current[index] = null;
+          toast({
+            title: "Screen capture failed",
+            description: String(err),
+            variant: "destructive",
+          });
+        });
+        setShowRegionSelector(false);
+        return;
+      }
+
+      // Browser path
       if (!pendingStream) return;
 
       const sectionIndex = selectedSection;
@@ -435,6 +489,8 @@ export function Preview({ isRecording = false }: PreviewProps) {
       pendingStream,
       selectedSection,
       screenDimensions,
+      externalConfig.frameRate,
+      externalConfig.outputWidth,
       setSectionSource,
       setSectionStream,
       clearSection,
@@ -445,6 +501,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
   );
 
   const handleRegionCancel = useCallback(() => {
+    nativeRegionPendingRef.current = null;
     if (pendingStream) {
       pendingStream.getTracks().forEach((track) => track.stop());
       setPendingStream(null);
@@ -764,6 +821,34 @@ export function Preview({ isRecording = false }: PreviewProps) {
         onSelectCamera={handleCameraSelect}
         sectionIndex={selectedSection}
       />
+
+      {/* Display picker — shown when >1 display is available (native path only) */}
+      <Dialog
+        open={showDisplayPicker}
+        onOpenChange={(open) => { if (!open) handleDisplayPickerClose(); }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Select display</DialogTitle>
+            <DialogDescription>Choose which display to capture.</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {availableDisplays.map((display, i) => (
+              <Button
+                key={display.displayId}
+                variant="outline"
+                className="justify-start"
+                onClick={() => handleDisplayConfirm(i)}
+              >
+                {display.isPrimary ? "Primary display" : `Display ${i + 1}`}
+                <span className="ml-auto text-xs text-muted-foreground">
+                  {display.width}×{display.height}
+                </span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Region Selector Overlay */}
       <RegionSelector
