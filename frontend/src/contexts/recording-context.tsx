@@ -4,10 +4,9 @@ import { defaultRecordingConfig, defaultSectionState, defaultExternalRecordingCo
 import { hasMediaApi } from "@/lib/utils";
 import { useAudioMonitor, type AudioMonitorState } from "@/hooks/use-audio-monitor";
 import type { 
-  RecordingConfig, 
-  RecordingStatus, 
-  DeviceList, 
-  SectionConfig, 
+  RecordingConfig,
+  RecordingStatus,
+  DeviceList,
   SectionState,
   RecordingSource,
   ExternalRecordingConfig 

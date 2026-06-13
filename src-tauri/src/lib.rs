@@ -77,23 +77,21 @@ fn receive_video_frame_base64(
 /// Tauri command: Save media recording from frontend (WebM or MP4)
 /// Frontend handles encoding and muxing, backend just saves the file
 #[tauri::command]
-fn save_media_recording(
-    video_data: String,
-    width: u32,
-    height: u32,
-    mime_type: String,
-) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+fn save_media_recording(request: tauri::ipc::Request<'_>) -> Result<String, String> {
     use std::path::PathBuf;
 
-    // Decode base64 video data
-    let video_bytes = STANDARD.decode(&video_data)
-        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+    // Video bytes arrive as the raw IPC request body (not base64), so large
+    // recordings don't hit the JS string-length limit on the way to Rust.
+    let tauri::ipc::InvokeBody::Raw(video_bytes) = request.body() else {
+        return Err("save_media_recording expects a raw byte body".to_string());
+    };
 
-    // Determine file extension from mime type
-    let extension = if mime_type.contains("webm") {
+    // Determine the extension from the container's magic bytes (more reliable
+    // than a passed mime type): WebM/Matroska starts with the EBML header, MP4
+    // has "ftyp" at byte offset 4.
+    let extension = if video_bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         "webm"
-    } else if mime_type.contains("mp4") {
+    } else if video_bytes.get(4..8) == Some(&b"ftyp"[..]) {
         "mp4"
     } else {
         "webm" // Default to webm
@@ -125,16 +123,14 @@ fn save_media_recording(
     };
 
     // Write video file
-    std::fs::write(&output_path, &video_bytes)
+    std::fs::write(&output_path, video_bytes)
         .map_err(|e| format!("Failed to write video file: {}", e))?;
 
     let path_str = output_path.to_string_lossy().to_string();
     println!(
-        "[Backend-MediaRecorder] Saved {}: {} ({}x{}, {} bytes)",
+        "[Backend-MediaRecorder] Saved {}: {} ({} bytes)",
         extension.to_uppercase(),
         path_str,
-        width,
-        height,
         video_bytes.len()
     );
 
