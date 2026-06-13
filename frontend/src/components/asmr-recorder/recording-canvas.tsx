@@ -7,6 +7,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
+import { hasMediaApi } from "@/lib/utils";
 import type { ScreenRegion } from "@/types/recording";
 
 interface SectionSource {
@@ -55,11 +56,17 @@ const RECORDING_SCALE = 1 / 1;
 const H264_CODEC = "avc1.42001f";
 const VIDEO_BITRATE = 12_000_000;
 const KEYFRAME_INTERVAL = 120;
+// Backpressure: when the WebCodecs encoder has more than this many frames still
+// queued, skip the current composite+encode tick so the queue can't grow without
+// bound (and the main thread isn't loaded with work the encoder can't keep up with).
+const ENCODE_QUEUE_LIMIT = 2;
 
 // Audio encoding constants
+// ASMR audio is the priority: capture in stereo (binaural cues) at a high AAC
+// bitrate. 256 kbps is negligible next to the 12 Mbps video budget.
 const AUDIO_SAMPLE_RATE = 48000;
-const AUDIO_NUM_CHANNELS = 1;
-const AUDIO_BITRATE = 128_000;
+const AUDIO_NUM_CHANNELS = 2;
+const AUDIO_BITRATE = 256_000;
 const AAC_CODEC = "mp4a.40.2";
 
 /**
@@ -80,6 +87,78 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
     );
   }
   return btoa(binaryStr);
+};
+
+/**
+ * Extract the bare AudioSpecificConfig (ASC) from an AAC decoderConfig
+ * description.
+ *
+ * WKWebView/Safari's AudioEncoder emits `decoderConfig.description` as a full
+ * MPEG-4 ES_Descriptor, but mp4-muxer wraps whatever it receives in its own
+ * DecoderSpecificInfo (esds). Handing it the ES_Descriptor therefore produces a
+ * doubly-nested esds whose top-level audioObjectType reads as 0 — no decoder
+ * (ffmpeg, CoreAudio/QuickTime) can open the track. We descend the descriptor
+ * tree to the DecoderSpecificInfo (tag 0x05) payload so the muxer wraps it once.
+ *
+ * Chrome already provides the bare ASC (which starts with the audioObjectType
+ * bits, not a descriptor tag), so we return null and leave its metadata as-is.
+ */
+const extractAudioSpecificConfig = (
+  description: ArrayBufferView | ArrayBufferLike,
+): Uint8Array | null => {
+  const bytes = ArrayBuffer.isView(description)
+    ? new Uint8Array(
+        description.buffer,
+        description.byteOffset,
+        description.byteLength,
+      )
+    : new Uint8Array(description);
+
+  // Only wrapped descriptors need fixing; a bare ASC starts with a value < 0x03.
+  const first = bytes[0];
+  if (first !== 0x03 && first !== 0x04 && first !== 0x05) return null;
+
+  // Read an MPEG-4 "expandable" size (7 bits per byte, high bit = continue).
+  const readLen = (buf: Uint8Array, at: number): [number, number] => {
+    let size = 0;
+    let i = at;
+    for (let k = 0; k < 4; k++) {
+      const b = buf[i++];
+      size = (size << 7) | (b & 0x7f);
+      if (!(b & 0x80)) break;
+    }
+    return [size, i];
+  };
+
+  // Find the DecoderSpecificInfo (tag 0x05) payload, descending through
+  // ES_Descriptor (0x03) and DecoderConfigDescriptor (0x04).
+  const findDsi = (buf: Uint8Array): Uint8Array | null => {
+    let i = 0;
+    while (i < buf.length) {
+      const tag = buf[i++];
+      const [size, contentStart] = readLen(buf, i);
+      const end = Math.min(contentStart + size, buf.length);
+      if (tag === 0x05) return buf.subarray(contentStart, end);
+      if (tag === 0x03) {
+        // ES_Descriptor: ES_ID(2) + flags(1) + optional fields, then children.
+        let p = contentStart + 2;
+        const flags = buf[p++];
+        if (flags & 0x80) p += 2; // streamDependenceFlag
+        if (flags & 0x40) p += 1 + buf[p]; // URL_Flag (length-prefixed string)
+        if (flags & 0x20) p += 2; // OCRstreamFlag
+        return findDsi(buf.subarray(p, end));
+      }
+      if (tag === 0x04) {
+        // DecoderConfigDescriptor: 13 fixed bytes, then children.
+        return findDsi(buf.subarray(contentStart + 13, end));
+      }
+      i = end; // unknown descriptor — skip
+    }
+    return null;
+  };
+
+  const asc = findDsi(bytes);
+  return asc && asc.length > 0 && asc.length < bytes.length ? asc : null;
 };
 
 /**
@@ -111,7 +190,9 @@ export const RecordingCanvas = forwardRef<
   const recordingHeight = Math.floor(outputHeight * RECORDING_SCALE);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
+  const droppedFrameCountRef = useRef<number>(0);
   const recordingStartTimeRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0);
   const lastFrameTimeRef = useRef<number>(0);
@@ -192,7 +273,27 @@ export const RecordingCanvas = forwardRef<
         if (source.type === "video") {
           const video = source.element as HTMLVideoElement;
           if (video.readyState >= video.HAVE_CURRENT_DATA) {
-            ctx.drawImage(video, destX, destY, destWidth, destHeight);
+            if (source.region) {
+              // Cropped screen capture: draw only the selected region straight
+              // from the live source video using the 9-arg source-rect form, so
+              // the recording reads the source directly instead of an
+              // rAF-driven intermediate canvas (which freezes when the window
+              // is occluded and adds a redundant copy).
+              const { x, y, width, height } = source.region;
+              ctx.drawImage(
+                video,
+                x,
+                y,
+                width,
+                height,
+                destX,
+                destY,
+                destWidth,
+                destHeight,
+              );
+            } else {
+              ctx.drawImage(video, destX, destY, destWidth, destHeight);
+            }
           } else {
             if (
               frameCountRef.current < 5 ||
@@ -244,7 +345,16 @@ export const RecordingCanvas = forwardRef<
       return;
     }
 
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    // Create the 2D context once and cache it. We never read pixels back from
+    // this canvas (its only consumers are new VideoFrame(canvas) and
+    // canvas.captureStream), so we deliberately omit willReadFrequently — in
+    // WebKit that flag forces permanent software rasterization. alpha:false
+    // keeps the always-opaque composite GPU-backed.
+    let ctx = ctxRef.current;
+    if (!ctx) {
+      ctx = canvas.getContext("2d", { alpha: false });
+      ctxRef.current = ctx;
+    }
     if (!ctx) {
       if (frameCountRef.current < 3)
         console.warn("[RecordingCanvas] Canvas context not available");
@@ -357,19 +467,66 @@ export const RecordingCanvas = forwardRef<
     ): Promise<MediaStreamTrack | null> => {
       const audioStreams: MediaStream[] = [];
 
-      if (wantMic) {
+      if (wantMic && !hasMediaApi("getUserMedia")) {
+        console.warn(
+          "[Audio] Microphone unavailable: navigator.mediaDevices.getUserMedia is missing in this webview.",
+        );
+      } else if (wantMic) {
         try {
+          // ASMR: disable the browser DSP that destroys quiet textures.
+          // Caveats verified against WebKit/macOS: echoCancellation:false drives
+          // the processing chain (and effectively noiseSuppression), but
+          // autoGainControl is NOT honored as a standalone constraint and
+          // channelCount is unreliable — so we read back getSettings() below and
+          // warn about anything the platform silently kept on.
           const micStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              channelCount: AUDIO_NUM_CHANNELS,
+              sampleRate: AUDIO_SAMPLE_RATE,
+            },
           });
           audioStreams.push(micStream);
-          console.log("[Audio] Microphone stream acquired");
+
+          const settings = micStream.getAudioTracks()[0]?.getSettings();
+          console.log("[Audio] Microphone stream acquired:", settings);
+          if (
+            settings &&
+            (settings.echoCancellation ||
+              settings.noiseSuppression ||
+              settings.autoGainControl)
+          ) {
+            console.warn(
+              "[Audio] DSP still active despite constraints (WebKit may ignore some):",
+              {
+                echoCancellation: settings.echoCancellation,
+                noiseSuppression: settings.noiseSuppression,
+                autoGainControl: settings.autoGainControl,
+              },
+            );
+          }
+          if (
+            settings?.channelCount &&
+            settings.channelCount < AUDIO_NUM_CHANNELS
+          ) {
+            console.warn(
+              `[Audio] Mic delivered ${settings.channelCount} channel(s); ` +
+                "recording will be dual-mono, not true stereo " +
+                "(WebKit may ignore the channelCount constraint).",
+            );
+          }
         } catch (error) {
           console.warn("[Audio] Failed to acquire microphone:", error);
         }
       }
 
-      if (wantSystemAudio) {
+      if (wantSystemAudio && !hasMediaApi("getDisplayMedia")) {
+        console.warn(
+          "[Audio] System audio unavailable: navigator.mediaDevices.getDisplayMedia is missing in this webview.",
+        );
+      } else if (wantSystemAudio) {
         try {
           const sysStream = await navigator.mediaDevices.getDisplayMedia({
             video: { width: 1, height: 1 },
@@ -422,8 +579,11 @@ export const RecordingCanvas = forwardRef<
   const startAudioProcessing = useCallback(
     (audioTrack: MediaStreamTrack, audioEncoder: AudioEncoder) => {
       try {
-        // Always use standard sample rate and mono for encoding consistency.
-        // The AudioContext resamples from the mic's native rate automatically.
+        // Always use standard sample rate and stereo (AUDIO_NUM_CHANNELS) for
+        // encoding consistency. The AudioContext resamples from the mic's
+        // native rate automatically, and the ScriptProcessorNode below is
+        // created with this channel count so inputBuffer.numberOfChannels
+        // always matches the encoder/muxer config.
         const sampleRate = AUDIO_SAMPLE_RATE;
         const channelCount = AUDIO_NUM_CHANNELS;
 
@@ -575,7 +735,21 @@ export const RecordingCanvas = forwardRef<
           const audioEncoder = new AudioEncoder({
             output: (chunk, metadata) => {
               try {
-                muxer.addAudioChunk(chunk, metadata);
+                // WKWebView/Safari hands a full ES_Descriptor as the
+                // description; pass mp4-muxer the bare ASC so the esds isn't
+                // double-wrapped (which makes the audio track undecodable).
+                const dc = metadata?.decoderConfig;
+                const asc = dc?.description
+                  ? extractAudioSpecificConfig(dc.description)
+                  : null;
+                if (dc && asc) {
+                  muxer.addAudioChunk(chunk, {
+                    ...metadata,
+                    decoderConfig: { ...dc, description: asc },
+                  });
+                } else {
+                  muxer.addAudioChunk(chunk, metadata);
+                }
               } catch (error) {
                 console.error(
                   "[WebCodecs] Failed to mux audio chunk:",
@@ -698,14 +872,31 @@ export const RecordingCanvas = forwardRef<
     if (!canvas) return;
 
     const perfStart = performance.now();
+    // Mark loop liveness on EVERY tick (including skipped backpressure ticks)
+    // so the watchdog tracks "is the frame loop running", not "did we encode" —
+    // otherwise sustained intentional dropping would trip false stall warnings.
+    lastFrameTimeRef.current = perfStart;
 
     try {
+      // Backpressure: if the hardware encoder is falling behind, skip this tick
+      // (composite + encode) so VideoFrames can't queue without bound and stall
+      // the main thread. Only applies to WebCodecs — MediaRecorder samples the
+      // canvas via captureStream and exposes no queue to inspect.
+      const encoder = videoEncoderRef.current;
+      if (
+        useWebCodecsRef.current &&
+        encoder &&
+        encoder.encodeQueueSize > ENCODE_QUEUE_LIMIT
+      ) {
+        droppedFrameCountRef.current++;
+        return;
+      }
+
       compositeFrame();
       const compositeTime = performance.now() - perfStart;
 
       // WebCodecs: create VideoFrame from canvas and encode
-      if (useWebCodecsRef.current && videoEncoderRef.current) {
-        const encoder = videoEncoderRef.current;
+      if (useWebCodecsRef.current && encoder) {
         if (encoder.state === "configured") {
           const timestampUs =
             (performance.now() - recordingStartTimeRef.current) * 1000;
@@ -722,7 +913,6 @@ export const RecordingCanvas = forwardRef<
       }
 
       frameCountRef.current++;
-      lastFrameTimeRef.current = performance.now();
 
       if (frameCountRef.current % 30 === 0) {
         const elapsed =
@@ -735,7 +925,8 @@ export const RecordingCanvas = forwardRef<
           `[RecordingCanvas-${method}] Frame ${frameCountRef.current}: ` +
             `composite=${compositeTime.toFixed(1)}ms, ` +
             `fps=${fps.toFixed(1)}, ` +
-            `elapsed=${elapsed.toFixed(1)}s`,
+            `elapsed=${elapsed.toFixed(1)}s, ` +
+            `dropped=${droppedFrameCountRef.current}`,
         );
       }
     } catch (error) {
@@ -760,6 +951,7 @@ export const RecordingCanvas = forwardRef<
         console.log(`[RecordingCanvas] Starting recording session`);
         recordingStartTimeRef.current = performance.now();
         frameCountRef.current = 0;
+        droppedFrameCountRef.current = 0;
         lastFrameTimeRef.current = performance.now();
 
         const canvas = canvasRef.current;

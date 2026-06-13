@@ -19,6 +19,13 @@ import { RegionSelector } from "./region-selector";
 import { RecordingCanvas } from "./recording-canvas";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { toast } from "@/hooks/use-toast";
+import { hasMediaApi } from "@/lib/utils";
+import {
+  startNativeScreenStream,
+  stopNativeScreenStream,
+  type ScreenStreamFrame,
+} from "@/lib/native-screen";
+import type { Channel } from "@tauri-apps/api/core";
 import type { ScreenRegion } from "@/types/recording";
 
 interface PreviewProps {
@@ -62,6 +69,12 @@ export function Preview({ isRecording = false }: PreviewProps) {
   const sectionRegions = useRef<SectionRegion>({});
   const sourceVideos = useRef<SectionSourceVideo>({});
   const animationFrames = useRef<{ [key: number]: number }>({});
+  // Native screen capture (WKWebView has no getDisplayMedia): a per-section
+  // Tauri Channel streaming JPEG frames, drawn into a per-section canvas.
+  const nativeScreenChannels = useRef<{
+    [key: number]: Channel<ScreenStreamFrame> | null;
+  }>({});
+  const nativeCanvasRefs = useRef<SectionCanvasRef>({});
 
   const {
     sectionState,
@@ -85,13 +98,35 @@ export function Preview({ isRecording = false }: PreviewProps) {
   const getSectionSources = useCallback((): [SectionSourceType, SectionSourceType, SectionSourceType, SectionSourceType] => {
     const sources = sectionState.sections.map((section, index): SectionSourceType => {
       const hasRegion = section.source === "screen" && sectionRegions.current[index];
-      
+
       if (section.source === null) {
         return { type: null, element: null };
       }
-      
+
+      // Native screen capture: the canvas is fed JPEG frames from the backend
+      // Channel. Takes priority over the browser-screen/region paths below.
+      if (nativeScreenChannels.current[index]) {
+        return {
+          type: "canvas",
+          element: nativeCanvasRefs.current[index] || null,
+        };
+      }
+
       if (hasRegion) {
-        // Use canvas for cropped screen capture
+        // Cropped screen capture: hand RecordingCanvas the live source <video>
+        // plus the crop region so it draws the region directly (9-arg
+        // drawImage), instead of reading the rAF-fed intermediate canvas. The
+        // on-screen preview still uses that canvas (canvasRefs); this only
+        // changes the recording source. Fall back to the canvas if the source
+        // video isn't available so the section never goes blank.
+        const sourceVideo = sourceVideos.current[index];
+        if (sourceVideo) {
+          return {
+            type: "video",
+            element: sourceVideo,
+            region: sectionRegions.current[index],
+          };
+        }
         return {
           type: "canvas",
           element: canvasRefs.current[index] || null,
@@ -166,11 +201,86 @@ export function Preview({ isRecording = false }: PreviewProps) {
 
   const handleRecordOption = async (option: "screen" | "camera") => {
     if (option === "screen") {
-      await startScreenCapture();
+      // Browser screen capture (getDisplayMedia) is unavailable in WKWebView, so
+      // use the native ScreenCaptureKit stream there; keep the browser path (with
+      // region selection) where getDisplayMedia actually exists.
+      if (hasMediaApi("getDisplayMedia")) {
+        await startScreenCapture();
+      } else {
+        await startNativeScreen(selectedSection);
+      }
     } else {
       setShowCameraModal(true);
     }
   };
+
+  // Tear down any native screen stream on a section (backend stream + refs), so
+  // switching a native-screen section to a camera/region doesn't leak the
+  // SCStream/worker or pin the section to its stale native canvas.
+  const stopNativeStreamForSection = useCallback((index: number) => {
+    if (nativeScreenChannels.current[index]) {
+      stopNativeScreenStream(index);
+      nativeScreenChannels.current[index] = null;
+      nativeCanvasRefs.current[index] = null;
+    }
+  }, []);
+
+  // Start native screen capture for a section (WKWebView path). Streams JPEG
+  // frames from the backend into the section's canvas, which feeds the composite.
+  const startNativeScreen = useCallback(
+    async (index: number) => {
+      try {
+        if (nativeScreenChannels.current[index]) {
+          await stopNativeScreenStream(index);
+          nativeScreenChannels.current[index] = null;
+        }
+
+        const channel = await startNativeScreenStream(
+          index,
+          (bitmap) => {
+            const canvas = nativeCanvasRefs.current[index];
+            if (!canvas) {
+              bitmap.close();
+              return;
+            }
+            if (
+              canvas.width !== bitmap.width ||
+              canvas.height !== bitmap.height
+            ) {
+              canvas.width = bitmap.width;
+              canvas.height = bitmap.height;
+            }
+            const ctx = canvas.getContext("2d");
+            if (ctx) ctx.drawImage(bitmap, 0, 0);
+            bitmap.close();
+          },
+          {
+            // Cap native screen at 30fps: each frame is decoded (JPEG ->
+            // ImageBitmap) on the main thread, which competes with the composite/
+            // encode loop. 30 is plenty for a downscaled screen quadrant.
+            fps: Math.min(externalConfig.frameRate || 30, 30),
+            // A 2x2 grid quadrant is half the output width; cap frames to that.
+            maxDimension: Math.ceil(externalConfig.outputWidth / 2),
+          },
+        );
+
+        nativeScreenChannels.current[index] = channel;
+        setSectionSource(index, "screen", undefined, "Screen (native)");
+
+        toast({
+          title: "Screen capture started",
+          description: `Native display capture in section ${index + 1}`,
+        });
+      } catch (err) {
+        toast({
+          title: "Screen capture failed",
+          description: String(err),
+          variant: "destructive",
+        });
+      }
+    },
+    [externalConfig.frameRate, externalConfig.outputWidth, setSectionSource],
+  );
 
   // Start canvas rendering loop for cropped video
   const startCanvasRendering = useCallback(
@@ -221,6 +331,15 @@ export function Preview({ isRecording = false }: PreviewProps) {
   }, []);
 
   const startScreenCapture = useCallback(async () => {
+    if (!hasMediaApi("getDisplayMedia")) {
+      toast({
+        title: "Screen capture unavailable",
+        description:
+          "This webview can't use browser screen capture (getDisplayMedia). The desktop app needs native screen capture.",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
@@ -261,6 +380,9 @@ export function Preview({ isRecording = false }: PreviewProps) {
       if (!pendingStream) return;
 
       const sectionIndex = selectedSection;
+
+      // If this section was a native screen stream, tear it down first.
+      stopNativeStreamForSection(sectionIndex);
 
       // Store the region for this section
       sectionRegions.current[sectionIndex] = region;
@@ -318,6 +440,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
       clearSection,
       startCanvasRendering,
       stopCanvasRendering,
+      stopNativeStreamForSection,
     ]
   );
 
@@ -334,6 +457,10 @@ export function Preview({ isRecording = false }: PreviewProps) {
     deviceName: string,
     stream: MediaStream
   ) => {
+    // If this section was a native screen stream, tear it down first so it
+    // doesn't keep running and masking the camera in the composite.
+    stopNativeStreamForSection(selectedSection);
+
     // Handle stream ending
     stream.getVideoTracks()[0].onended = () => {
       clearSection(selectedSection);
@@ -358,6 +485,9 @@ export function Preview({ isRecording = false }: PreviewProps) {
     sectionRegions.current[index] = null;
     videoRefs.current[index] = null;
 
+    // Stop native screen stream if this section had one
+    stopNativeStreamForSection(index);
+
     clearSection(index);
     toast({
       title: "Section cleared",
@@ -367,10 +497,19 @@ export function Preview({ isRecording = false }: PreviewProps) {
 
   // Cleanup on unmount
   useEffect(() => {
+    const channels = nativeScreenChannels.current;
+    const frames = animationFrames.current;
     return () => {
       // Stop all canvas rendering
-      Object.keys(animationFrames.current).forEach((key) => {
-        cancelAnimationFrame(animationFrames.current[parseInt(key)]);
+      Object.keys(frames).forEach((key) => {
+        cancelAnimationFrame(frames[parseInt(key)]);
+      });
+      // Stop all native screen streams
+      Object.keys(channels).forEach((key) => {
+        if (channels[parseInt(key)]) {
+          stopNativeScreenStream(parseInt(key));
+          channels[parseInt(key)] = null;
+        }
       });
     };
   }, []);
@@ -400,6 +539,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
     const section = sectionState.sections[index];
     const hasRegion =
       section.source === "screen" && sectionRegions.current[index];
+    const isNativeScreen = !!nativeScreenChannels.current[index];
 
     if (section.source === null) {
       // Empty section - show add button
@@ -424,8 +564,18 @@ export function Preview({ isRecording = false }: PreviewProps) {
     // Section has content - show video feed or canvas (for cropped screen)
     return (
       <div className="relative w-full h-full rounded-lg overflow-hidden group">
-        {/* Canvas for cropped screen capture */}
-        {hasRegion && (
+        {/* Native screen capture canvas (WKWebView path, fed by JPEG frames) */}
+        {isNativeScreen && (
+          <canvas
+            ref={(el) => {
+              nativeCanvasRefs.current[index] = el;
+            }}
+            className="w-full h-full object-contain bg-black"
+          />
+        )}
+
+        {/* Canvas for cropped browser screen capture */}
+        {!isNativeScreen && hasRegion && (
           <canvas
             ref={(el) => {
               canvasRefs.current[index] = el;
@@ -435,7 +585,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
         )}
 
         {/* Video feed (for camera or full-screen capture without region) */}
-        {!hasRegion && (
+        {!isNativeScreen && !hasRegion && (
           <video
             ref={(el) => {
               videoRefs.current[index] = el;

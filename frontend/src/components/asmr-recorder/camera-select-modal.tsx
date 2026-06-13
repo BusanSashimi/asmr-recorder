@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Camera, Check, Loader2 } from "lucide-react";
 import { useRecordingContext } from "@/contexts/recording-context";
+import { hasMediaApi } from "@/lib/utils";
 
 interface CameraSelectModalProps {
   open: boolean;
@@ -52,6 +53,14 @@ export function CameraSelectModal({
       // Stop previous stream
       if (previewStream) {
         previewStream.getTracks().forEach(track => track.stop());
+      }
+
+      if (!hasMediaApi("getUserMedia")) {
+        setError(
+          "Camera access is unavailable in this webview (navigator.mediaDevices is missing). It requires a secure context and camera permissions.",
+        );
+        setIsLoading(false);
+        return;
       }
 
       try {

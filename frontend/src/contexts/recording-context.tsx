@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { defaultRecordingConfig, defaultSectionState, defaultExternalRecordingConfig, OUTPUT_RESOLUTIONS } from "@/types/recording";
+import { hasMediaApi } from "@/lib/utils";
 import type { 
   RecordingConfig, 
   RecordingStatus, 
@@ -72,14 +73,22 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
 
   // Fetch browser media devices (cameras, microphones)
   const fetchBrowserDevices = useCallback(async () => {
+    if (!hasMediaApi("enumerateDevices")) {
+      console.warn(
+        "Browser media devices unavailable: navigator.mediaDevices is missing in this webview (expected in Tauri dev over http://localhost).",
+      );
+      return;
+    }
     try {
       // Request permission first to get full device info
-      await navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
-        stream.getTracks().forEach(track => track.stop());
-      }).catch(() => {
-        // Permission denied, continue with limited device info
-      });
-      
+      if (hasMediaApi("getUserMedia")) {
+        await navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+          stream.getTracks().forEach(track => track.stop());
+        }).catch(() => {
+          // Permission denied, continue with limited device info
+        });
+      }
+
       const devices = await navigator.mediaDevices.enumerateDevices();
       setBrowserDevices(devices);
     } catch (err) {
