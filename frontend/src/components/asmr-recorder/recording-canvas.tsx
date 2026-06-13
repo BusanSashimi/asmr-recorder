@@ -762,12 +762,29 @@ export const RecordingCanvas = forwardRef<
             },
           });
 
-          audioEncoder.configure({
+          // WebKit's AAC encoder defaults to VBR, which treats `bitrate` as a
+          // loose ceiling and encodes quiet ASMR content far below it (~80-130k
+          // observed vs the 256k requested). Request CBR so the configured rate
+          // is actually used; fall back to the default mode if CBR is rejected,
+          // so this can never break the (verified) audio path.
+          const baseAudioConfig: AudioEncoderConfig = {
             codec: AAC_CODEC,
             numberOfChannels,
             sampleRate,
             bitrate: AUDIO_BITRATE,
-          });
+          };
+          try {
+            audioEncoder.configure({
+              ...baseAudioConfig,
+              bitrateMode: "constant",
+            });
+          } catch (cbrError) {
+            console.warn(
+              "[WebCodecs] CBR audio config rejected; using default bitrate mode:",
+              cbrError,
+            );
+            audioEncoder.configure(baseAudioConfig);
+          }
 
           audioEncoderRef.current = audioEncoder;
           startAudioProcessing(audioTrack, audioEncoder);
