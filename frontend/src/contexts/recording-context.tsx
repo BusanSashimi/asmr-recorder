@@ -64,9 +64,12 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const recordingStartTimeRef = useRef<number>(0);
 
   // Live mic monitor for the timeline's Audio Track section. Decoupled from the
-  // recording pipeline (recording-canvas opens its own mic); active while the
-  // mic source is enabled so levels are visible before and during recording.
-  const audioMonitor = useAudioMonitor(externalConfig.captureMic);
+  // recording pipeline (recording-canvas opens its own mic). Gated to run ONLY
+  // while recording with the mic enabled, so it doesn't hold the mic open — and
+  // light the OS mic indicator — when idle.
+  const audioMonitor = useAudioMonitor(
+    status.isRecording && externalConfig.captureMic,
+  );
 
   // Fetch available devices from Tauri backend
   const fetchDevices = useCallback(async () => {
