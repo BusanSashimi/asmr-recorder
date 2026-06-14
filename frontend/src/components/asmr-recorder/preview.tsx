@@ -916,6 +916,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
         micDeviceId={externalConfig.micDeviceId}
         captureSystemAudio={externalConfig.captureSystemAudio}
         micGain={externalConfig.micGain}
+        micHighpass={externalConfig.micHighpass}
         systemAudioGain={externalConfig.systemAudioGain}
         layout={externalConfig.layout}
         pipPosition={externalConfig.pipPosition}

@@ -49,6 +49,8 @@ interface RecordingCanvasProps {
   captureSystemAudio: boolean;
   /** Mic gain multiplier (1.0 = unity) */
   micGain: number;
+  /** High-pass filter on mic input (~80 Hz) */
+  micHighpass: boolean;
   /** System audio gain multiplier (1.0 = unity) */
   systemAudioGain: number;
   /** Composition layout */
@@ -206,6 +208,7 @@ export const RecordingCanvas = forwardRef<
     micDeviceId,
     captureSystemAudio,
     micGain,
+    micHighpass,
     systemAudioGain,
     layout,
     pipPosition,
@@ -250,11 +253,13 @@ export const RecordingCanvas = forwardRef<
   const audioProcessingCleanupRef = useRef<(() => void) | null>(null);
   const nativeSystemAudioCleanupRef = useRef<(() => void) | null>(null);
   const micGainNodeRef = useRef<GainNode | null>(null);
+  const micHighpassNodeRef = useRef<BiquadFilterNode | null>(null);
   const systemAudioGainNodeRef = useRef<GainNode | null>(null);
   const captureMicRef = useRef(captureMic);
   const micDeviceIdRef = useRef(micDeviceId);
   const captureSystemAudioRef = useRef(captureSystemAudio);
   const micGainRef = useRef(micGain);
+  const micHighpassRef = useRef(micHighpass);
   const systemAudioGainRef = useRef(systemAudioGain);
   const layoutRef = useRef(layout);
   const pipPositionRef = useRef(pipPosition);
@@ -272,6 +277,7 @@ export const RecordingCanvas = forwardRef<
     micDeviceIdRef.current = micDeviceId;
     captureSystemAudioRef.current = captureSystemAudio;
     micGainRef.current = micGain;
+    micHighpassRef.current = micHighpass;
     systemAudioGainRef.current = systemAudioGain;
     layoutRef.current = layout;
     pipPositionRef.current = pipPosition;
@@ -280,6 +286,10 @@ export const RecordingCanvas = forwardRef<
     const t = audioContextRef.current?.currentTime ?? 0;
     micGainNodeRef.current?.gain.setTargetAtTime(micGain, t, 0.02);
     systemAudioGainNodeRef.current?.gain.setTargetAtTime(systemAudioGain, t, 0.02);
+    // Toggle the high-pass filter by switching type — "allpass" passes everything unchanged.
+    if (micHighpassNodeRef.current) {
+      micHighpassNodeRef.current.type = micHighpass ? "highpass" : "allpass";
+    }
   }, [
     sectionSources,
     getSectionSources,
@@ -291,6 +301,7 @@ export const RecordingCanvas = forwardRef<
     micDeviceId,
     captureSystemAudio,
     micGain,
+    micHighpass,
     systemAudioGain,
     layout,
     pipPosition,
@@ -621,9 +632,16 @@ export const RecordingCanvas = forwardRef<
 
       if (micStream) {
         const source = audioContext.createMediaStreamSource(micStream);
+        // High-pass filter: cuts rumble and handling noise below ~80 Hz.
+        // Toggled live by switching type to "allpass" (transparent bypass).
+        const hpf = audioContext.createBiquadFilter();
+        hpf.type = micHighpassRef.current ? "highpass" : "allpass";
+        hpf.frequency.value = 80;
+        micHighpassNodeRef.current = hpf;
         const gainNode = audioContext.createGain();
         gainNode.gain.value = micGainRef.current;
-        source.connect(gainNode);
+        source.connect(hpf);
+        hpf.connect(gainNode);
         gainNode.connect(destination);
         micGainNodeRef.current = gainNode;
       }

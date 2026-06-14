@@ -301,6 +301,21 @@ export function Toolbar() {
                     />
                   </div>
                 )}
+                {/* High-pass filter toggle */}
+                {externalConfig.captureMic && (
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="mic-highpass" className="text-xs text-muted-foreground">
+                      High-pass filter (80 Hz)
+                    </Label>
+                    <Switch
+                      id="mic-highpass"
+                      checked={externalConfig.micHighpass}
+                      onCheckedChange={(checked) =>
+                        updateExternalConfig({ micHighpass: checked })
+                      }
+                    />
+                  </div>
+                )}
                 {/* System Audio row */}
                 <div className="flex items-center justify-between">
                   <Label

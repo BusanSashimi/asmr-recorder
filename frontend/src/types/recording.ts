@@ -72,6 +72,8 @@ export interface ExternalRecordingConfig {
   micDeviceId?: string;
   /** Mic gain multiplier (1.0 = unity, 0–3) */
   micGain: number;
+  /** High-pass filter on mic input (~80 Hz, cuts rumble/handling noise) */
+  micHighpass: boolean;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
   /** System audio gain multiplier (1.0 = unity, 0–3) */
@@ -99,6 +101,7 @@ export interface ExternalRecordingConfig {
 export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
   captureMic: true,
   micGain: 1.0,
+  micHighpass: true,
   captureSystemAudio: false,
   systemAudioGain: 1.0,
   videoQuality: "medium",
