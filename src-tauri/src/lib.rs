@@ -13,10 +13,12 @@ mod manager;
 mod recording;
 mod external_recorder;
 mod screen_stream;
+mod system_audio_stream;
 
 pub use recording::{RecordingConfig, RecordingState, RecordingStatus, DeviceList, ExternalRecordingConfig};
 use external_recorder::ExternalRecorder;
 use screen_stream::ScreenStreamState;
+use system_audio_stream::SystemAudioStreamState;
 
 /// Global state for external frame recorder
 pub struct ExternalRecorderState {
@@ -171,11 +173,15 @@ pub fn run() {
     // Initialize native screen-stream state
     let screen_stream_state = Arc::new(ScreenStreamState::default());
 
+    // Initialize native system-audio stream state
+    let system_audio_stream_state = Arc::new(SystemAudioStreamState::default());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(recording_state)
         .manage(external_recorder_state)
         .manage(screen_stream_state)
+        .manage(system_audio_stream_state)
         .invoke_handler(tauri::generate_handler![
             greet,
             // Legacy commands (will be deprecated)
@@ -201,6 +207,10 @@ pub fn run() {
             screen_stream::start_screen_stream,
             screen_stream::stop_screen_stream,
             screen_stream::ack_screen_frame,
+            // Native system-audio capture streaming (WKWebView lacks getDisplayMedia)
+            system_audio_stream::start_system_audio_stream,
+            system_audio_stream::stop_system_audio_stream,
+            system_audio_stream::ack_system_audio_chunk,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

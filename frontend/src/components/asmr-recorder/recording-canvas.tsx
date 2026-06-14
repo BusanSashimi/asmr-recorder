@@ -8,6 +8,10 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import { hasMediaApi } from "@/lib/utils";
+import {
+  startNativeSystemAudioStream,
+  stopNativeSystemAudioStream,
+} from "@/lib/native-system-audio";
 import type { ScreenRegion } from "@/types/recording";
 
 interface SectionSource {
@@ -204,6 +208,7 @@ export const RecordingCanvas = forwardRef<
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioProcessingCleanupRef = useRef<(() => void) | null>(null);
+  const nativeSystemAudioCleanupRef = useRef<(() => void) | null>(null);
   const captureMicRef = useRef(captureMic);
   const captureSystemAudioRef = useRef(captureSystemAudio);
 
@@ -496,10 +501,11 @@ export const RecordingCanvas = forwardRef<
         }
       }
 
+      // WKWebView: getDisplayMedia is blocked, so system audio must come from the
+      // native SCK path. Set a flag so we force the mix-context path below.
+      let wantNativeSystemAudio = false;
       if (wantSystemAudio && !hasMediaApi("getDisplayMedia")) {
-        console.warn(
-          "[Audio] System audio unavailable: navigator.mediaDevices.getDisplayMedia is missing in this webview.",
-        );
+        wantNativeSystemAudio = true;
       } else if (wantSystemAudio) {
         try {
           const sysStream = await navigator.mediaDevices.getDisplayMedia({
@@ -514,9 +520,14 @@ export const RecordingCanvas = forwardRef<
         }
       }
 
-      if (audioStreams.length === 0) return null;
+      if (audioStreams.length === 0 && !wantNativeSystemAudio) return null;
 
-      if (audioStreams.length === 1) {
+      // Force a mixing AudioContext when native system audio is requested so the
+      // native stream has a destination node to connect to, even if mic is the
+      // only MediaStream source (or there are no MediaStream sources at all).
+      const needsMixContext = audioStreams.length > 1 || wantNativeSystemAudio;
+
+      if (!needsMixContext) {
         const track = audioStreams[0].getAudioTracks()[0] || null;
         audioStreamRef.current = new MediaStream(
           audioStreams.flatMap((s) => s.getAudioTracks()),
@@ -531,6 +542,17 @@ export const RecordingCanvas = forwardRef<
       for (const stream of audioStreams) {
         const source = audioContext.createMediaStreamSource(stream);
         source.connect(destination);
+      }
+
+      if (wantNativeSystemAudio) {
+        await startNativeSystemAudioStream(0, audioContext, destination, {
+          sampleRate: audioContext.sampleRate,
+          channels: AUDIO_NUM_CHANNELS,
+        }).catch((err) =>
+          console.warn("[Audio] Native system audio stream failed:", err),
+        );
+        nativeSystemAudioCleanupRef.current = () =>
+          stopNativeSystemAudioStream(0);
       }
 
       audioStreamRef.current = new MediaStream([
@@ -1092,6 +1114,12 @@ export const RecordingCanvas = forwardRef<
       if (audioProcessingCleanupRef.current) {
         audioProcessingCleanupRef.current();
         audioProcessingCleanupRef.current = null;
+      }
+
+      // Stop native system-audio stream and disconnect its audio nodes
+      if (nativeSystemAudioCleanupRef.current) {
+        nativeSystemAudioCleanupRef.current();
+        nativeSystemAudioCleanupRef.current = null;
       }
 
       // Snapshot the recording method before clearing refs
