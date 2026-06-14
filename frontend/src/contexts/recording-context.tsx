@@ -89,13 +89,12 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     try {
-      // Request permission first to get full device info
+      // Request audio + video permission so enumerateDevices returns full deviceIds
       if (hasMediaApi("getUserMedia")) {
-        await navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-          stream.getTracks().forEach(track => track.stop());
-        }).catch(() => {
-          // Permission denied, continue with limited device info
-        });
+        await Promise.allSettled([
+          navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())),
+          navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t => t.stop())),
+        ]);
       }
 
       const devices = await navigator.mediaDevices.enumerateDevices();
