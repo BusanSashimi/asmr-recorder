@@ -30,6 +30,8 @@ import {
   Settings,
   Video,
   Volume2,
+  FolderOpen,
+  RotateCcw,
 } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "@/hooks/use-toast";
@@ -42,6 +44,10 @@ import { StereoMeter } from "./audio-monitor-graphics";
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Tracks the most recent recording blob so "Re-edit" can reopen the TrimEditor
+  // without requiring the user to locate the saved file on disk.
+  const [lastBlob, setLastBlob] = useState<Blob | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const {
     status,
@@ -68,6 +74,38 @@ export function Toolbar() {
     }
     previousOutputPathRef.current = status.outputPath;
   }, [status.outputPath]);
+
+  // Capture the blob from each completed recording so "Re-edit" can reopen it.
+  useEffect(() => {
+    const onReady = (e: Event) => {
+      setLastBlob((e as CustomEvent<{ blob: Blob }>).detail.blob);
+    };
+    window.addEventListener("recordingReadyForEdit", onReady);
+    return () => window.removeEventListener("recordingReadyForEdit", onReady);
+  }, []);
+
+  // Clear the stale blob when a new recording starts.
+  useEffect(() => {
+    if (isExternalRecording) setLastBlob(null);
+  }, [isExternalRecording]);
+
+  const handleOpenFile = () => fileInputRef.current?.click();
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    window.dispatchEvent(
+      new CustomEvent("recordingReadyForEdit", { detail: { blob: file } }),
+    );
+    e.target.value = "";
+  };
+
+  const handleReEdit = () => {
+    if (!lastBlob) return;
+    window.dispatchEvent(
+      new CustomEvent("recordingReadyForEdit", { detail: { blob: lastBlob } }),
+    );
+  };
 
   // Check if any section has content (for enabling record button)
   const hasContent = sectionState.sections.some(
@@ -511,6 +549,32 @@ export function Toolbar() {
 
       <Separator orientation="vertical" className="h-6" />
 
+      {/* Open recording file */}
+      <Button
+        variant="outline"
+        size="sm"
+        className="gap-2 bg-transparent"
+        onClick={handleOpenFile}
+        title="Open a saved recording for editing"
+      >
+        <FolderOpen className="h-4 w-4" />
+        Open
+      </Button>
+
+      {/* Re-edit last recording (shown after a recording completes) */}
+      {lastBlob && !isExternalRecording && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-2 bg-transparent"
+          onClick={handleReEdit}
+          title="Reopen the last recording in the trim editor"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Re-edit
+        </Button>
+      )}
+
       {/* Export */}
       <Button
         variant="outline"
@@ -521,6 +585,15 @@ export function Toolbar() {
         <Download className="h-4 w-4" />
         Export
       </Button>
+
+      {/* Hidden file input for opening saved recordings */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/mp4,.mp4"
+        className="hidden"
+        onChange={handleFileChange}
+      />
 
       <div className="flex-1" />
 
