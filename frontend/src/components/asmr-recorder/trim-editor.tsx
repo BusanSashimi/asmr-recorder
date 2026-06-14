@@ -14,18 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
-
-/** mm:ss.t */
-function formatTime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  const t = Math.floor((seconds % 1) * 10);
-  return `${m}:${s.toString().padStart(2, "0")}.${t}`;
-}
-
-/** A keep-range within the clip (seconds, in < out). */
-type Segment = { in: number; out: number };
+import { type Segment, formatTime, splitSegment, keptDuration } from "./trim-segments";
 
 /**
  * Re-encode frames [inSec, gopEnd) from a video track into a short segment and
@@ -271,10 +260,7 @@ export function TrimEditor() {
   const activeSeg = segments[activeSegIdx] ?? { in: 0, out: duration };
   const inPoint = activeSeg.in;
   const outPoint = activeSeg.out;
-  const totalKeptDuration = segments.reduce(
-    (sum, s) => sum + Math.max(0, s.out - s.in),
-    0,
-  );
+  const totalKeptDuration = keptDuration(segments);
 
   useEffect(() => {
     const onReady = (event: Event) => {
@@ -452,10 +438,7 @@ export function TrimEditor() {
   const handleCutSelection = useCallback(() => {
     const seg = segments[activeSegIdx];
     if (!seg) return;
-    const MIN_SEG = 0.1; // seconds — don't create segments shorter than this
-    const replacements: Segment[] = [];
-    if (inPoint - seg.in > MIN_SEG) replacements.push({ in: seg.in, out: inPoint });
-    if (seg.out - outPoint > MIN_SEG) replacements.push({ in: outPoint, out: seg.out });
+    const replacements = splitSegment(seg, inPoint, outPoint);
     if (replacements.length === 0) return;
 
     setSegments((prev) => [

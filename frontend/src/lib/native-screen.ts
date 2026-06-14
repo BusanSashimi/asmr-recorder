@@ -1,4 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { parseFrameHeader } from "./screen-wire";
+export type { FrameHeader } from "./screen-wire";
+export { parseFrameHeader } from "./screen-wire";
 
 /**
  * Native screen capture streamed from the Rust backend.
@@ -59,13 +62,10 @@ export async function startNativeScreenStream(
   };
 
   channel.onmessage = (buf: ArrayBuffer) => {
-    // Wire format: 16-byte LE header (u32 width, u32 height, u64 timestamp_ms)
-    // followed by JPEG payload.
-    const dv = new DataView(buf);
-    const width = dv.getUint32(0, true);
-    const height = dv.getUint32(4, true);
-    const timestampMs = Number(dv.getBigUint64(8, true));
-    const jpeg = new Blob([buf.slice(16)], { type: "image/jpeg" });
+    const header = parseFrameHeader(buf);
+    if (!header) { ack(); return; }
+    const { width, height, timestampMs, jpegOffset } = header;
+    const jpeg = new Blob([buf.slice(jpegOffset)], { type: "image/jpeg" });
     createImageBitmap(jpeg)
       .then((bitmap) => { onFrame(bitmap, { width, height, timestampMs }); ack(); })
       .catch((e) => { console.warn("[native-screen] frame decode failed:", e); ack(); });

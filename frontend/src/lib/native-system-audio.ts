@@ -1,4 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { parseAudioChunkHeader, AUDIO_HEADER_BYTES } from "./audio-wire";
+export type { AudioChunkHeader } from "./audio-wire";
+export { parseAudioChunkHeader } from "./audio-wire";
 
 /**
  * Native system-audio capture streamed from the Rust backend.
@@ -18,7 +21,6 @@ import { Channel, invoke } from "@tauri-apps/api/core";
  *   bytes 16..  : f32 interleaved PCM (LE) — 4-byte aligned for zero-copy Float32Array view
  */
 
-const HEADER_BYTES = 16;
 const WORKLET_PROCESSOR_NAME = "ring-buffer-source";
 
 // Inline AudioWorklet ring-buffer source processor registered via a Blob URL.
@@ -214,14 +216,10 @@ export async function startNativeSystemAudioStream(
     invoke("ack_system_audio_chunk", { sectionIndex }).catch(() => {});
 
   channel.onmessage = (buf: ArrayBuffer) => {
-    if (buf.byteLength < HEADER_BYTES) {
-      ack();
-      return;
-    }
-
-    const dv = new DataView(buf);
-    const chunkChannels = dv.getUint16(4, true);
-    const numSamples = (buf.byteLength - HEADER_BYTES) / 4;
+    const header = parseAudioChunkHeader(buf);
+    if (!header) { ack(); return; }
+    const chunkChannels = header.channels;
+    const numSamples = (buf.byteLength - AUDIO_HEADER_BYTES) / 4;
     const frameCount = Math.floor(numSamples / Math.max(chunkChannels, 1));
 
     if (frameCount <= 0) {
@@ -231,7 +229,7 @@ export async function startNativeSystemAudioStream(
 
     // Zero-copy Float32Array view into the PCM payload.
     // Header is 16 bytes (4-byte aligned) so offset 16 is valid for Float32Array.
-    const interleaved = new Float32Array(buf, HEADER_BYTES, numSamples);
+    const interleaved = new Float32Array(buf, AUDIO_HEADER_BYTES, numSamples);
 
     // De-interleave into per-channel Float32Arrays.
     const frames: Float32Array[] = [];

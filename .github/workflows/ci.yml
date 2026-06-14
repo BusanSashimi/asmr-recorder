@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install root deps
+        run: npm ci
+
+      - name: Install frontend deps
+        run: npm ci --prefix frontend
+
+      - name: Rust build
+        run: cargo build
+        working-directory: src-tauri
+        env:
+          DYLD_LIBRARY_PATH: /usr/lib/swift
+
+      - name: Rust tests
+        run: cargo test
+        working-directory: src-tauri
+        env:
+          DYLD_LIBRARY_PATH: /usr/lib/swift
+
+      - name: TypeScript check
+        run: npx tsc -b
+        working-directory: frontend
+
+      - name: Vite build
+        run: npx vite build
+        working-directory: frontend
+
+      - name: Frontend tests
+        run: npm run test
+        working-directory: frontend
