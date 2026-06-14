@@ -5,7 +5,7 @@ import {
   forwardRef,
   useImperativeHandle,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import { hasMediaApi } from "@/lib/utils";
 import {
@@ -501,10 +501,10 @@ export const RecordingCanvas = forwardRef<
         }
       }
 
-      // WKWebView: getDisplayMedia is blocked, so system audio must come from the
-      // native SCK path. Set a flag so we force the mix-context path below.
+      // In Tauri (WKWebView), getDisplayMedia exists as a function but is blocked;
+      // use the native SCK path instead. In a plain browser, fall back to getDisplayMedia.
       let wantNativeSystemAudio = false;
-      if (wantSystemAudio && !hasMediaApi("getDisplayMedia")) {
+      if (wantSystemAudio && isTauri()) {
         wantNativeSystemAudio = true;
       } else if (wantSystemAudio) {
         try {
