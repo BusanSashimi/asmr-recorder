@@ -17,3 +17,7 @@ src-tauri/target/
 # AI development and reference files
 reference/
 test-results/
+
+# Apple signing / notarization credentials (never commit)
+.env
+.env.local
