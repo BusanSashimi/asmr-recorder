@@ -921,6 +921,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
         layout={externalConfig.layout}
         pipPosition={externalConfig.pipPosition}
         pipSize={externalConfig.pipSize}
+        videoQuality={externalConfig.videoQuality}
       />
     </div>
   );

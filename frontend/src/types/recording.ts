@@ -6,6 +6,12 @@ export type LayoutType = "grid-2x2" | "solo" | "side-by-side" | "pip";
 
 export type VideoQuality = "low" | "medium" | "high";
 
+export const VIDEO_QUALITY_BITRATES: Record<VideoQuality, number> = {
+  low:    4_000_000,
+  medium: 8_000_000,
+  high:  16_000_000,
+};
+
 // Output resolution presets (all 16:9 aspect ratio)
 export type OutputResolution = "hd720" | "hd1080" | "qhd1440" | "uhd4k";
 

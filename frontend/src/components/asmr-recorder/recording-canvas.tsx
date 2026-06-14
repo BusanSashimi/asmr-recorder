@@ -12,7 +12,8 @@ import {
   startNativeSystemAudioStream,
   stopNativeSystemAudioStream,
 } from "@/lib/native-system-audio";
-import type { ScreenRegion, PipPosition, LayoutType } from "@/types/recording";
+import type { ScreenRegion, PipPosition, LayoutType, VideoQuality } from "@/types/recording";
+import { VIDEO_QUALITY_BITRATES } from "@/types/recording";
 import { computeSlots } from "@/lib/layouts";
 
 interface SectionSource {
@@ -59,6 +60,8 @@ interface RecordingCanvasProps {
   pipPosition: PipPosition;
   /** PiP overlay size as fraction of output width (only used when layout === "pip") */
   pipSize: number;
+  /** Video quality preset — controls encoder bitrate */
+  videoQuality: VideoQuality;
 }
 
 export interface RecordingCanvasRef {
@@ -73,11 +76,9 @@ const RECORDING_SCALE = 1 / 1;
 
 // WebCodecs H.264 Baseline profile
 const H264_CODEC = "avc1.42001f";
-const VIDEO_BITRATE = 12_000_000;
-// Emit a keyframe roughly once per second. A lossless trim can only start the
-// cut on a keyframe, so denser keyframes let the post-record editor snap the
-// cut-in point close to where the user drags (computed from fps in the loop).
-const KEYFRAME_INTERVAL_SECONDS = 1;
+// Keyframe every 3 seconds. ASMR content is slow-moving so longer GOP is
+// fine; trim cuts can still land within 3s of the drag point.
+const KEYFRAME_INTERVAL_SECONDS = 3;
 // Backpressure: when the WebCodecs encoder has more than this many frames still
 // queued, skip the current composite+encode tick so the queue can't grow without
 // bound (and the main thread isn't loaded with work the encoder can't keep up with).
@@ -213,11 +214,13 @@ export const RecordingCanvas = forwardRef<
     layout,
     pipPosition,
     pipSize,
+    videoQuality,
   },
   ref,
 ) {
   const recordingWidth = Math.floor(outputWidth * RECORDING_SCALE);
   const recordingHeight = Math.floor(outputHeight * RECORDING_SCALE);
+  const videoBitrate = VIDEO_QUALITY_BITRATES[videoQuality];
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -934,7 +937,7 @@ export const RecordingCanvas = forwardRef<
           width,
           height,
           framerate: fps,
-          bitrate: VIDEO_BITRATE,
+          bitrate: videoBitrate,
           hardwareAcceleration: "prefer-hardware",
           latencyMode: "realtime",
         });
@@ -1007,7 +1010,7 @@ export const RecordingCanvas = forwardRef<
 
       const recorder = new MediaRecorder(stream, {
         mimeType,
-        videoBitsPerSecond: VIDEO_BITRATE,
+        videoBitsPerSecond: videoBitrate,
       });
 
       recorder.ondataavailable = (event) => {
