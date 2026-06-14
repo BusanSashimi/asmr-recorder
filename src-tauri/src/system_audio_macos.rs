@@ -5,7 +5,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 use screencapturekit::prelude::*;
 
-use crate::audio::AudioChunk;
+use crate::system_audio::AudioChunk;
 
 use super::SystemAudioCaptureConfig;
 
@@ -58,10 +58,6 @@ impl SystemAudioCapture {
             stream: Arc::new(Mutex::new(None)),
             is_available: true,
         })
-    }
-
-    pub fn is_available(&self) -> bool {
-        self.is_available
     }
 
     pub fn take_receiver(&mut self) -> Option<Receiver<AudioChunk>> {

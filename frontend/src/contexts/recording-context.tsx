@@ -18,8 +18,6 @@ interface RecordingContextValue {
   status: RecordingStatus;
   devices: DeviceList | null;
   error: string | null;
-  startRecording: () => Promise<void>;
-  stopRecording: () => Promise<string>;
   fetchDevices: () => Promise<void>;
   // Section-based recording
   sectionState: SectionState;
@@ -112,24 +110,14 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     fetchBrowserDevices();
   }, [fetchDevices, fetchBrowserDevices]);
 
-  // Poll recording status when recording (native or external)
+  // Poll recording duration while external recording is active
   useEffect(() => {
-    const isRecordingActive = status.isRecording || isExternalRecording;
+    const isRecordingActive = isExternalRecording;
     
     if (isRecordingActive) {
-      statusPollRef.current = window.setInterval(async () => {
-        try {
-          if (isExternalRecording) {
-            // Track duration locally for MediaRecorder-based recording
-            const elapsedMs = Date.now() - recordingStartTimeRef.current;
-            setStatus((prev) => ({ ...prev, durationMs: elapsedMs }));
-          } else {
-            const newStatus = await invoke<RecordingStatus>("get_recording_status_live");
-            setStatus(newStatus);
-          }
-        } catch (err) {
-          console.error("Failed to fetch status:", err);
-        }
+      statusPollRef.current = window.setInterval(() => {
+        const elapsedMs = Date.now() - recordingStartTimeRef.current;
+        setStatus((prev) => ({ ...prev, durationMs: elapsedMs }));
       }, 500);
     } else {
       if (statusPollRef.current) {
@@ -143,38 +131,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
         clearInterval(statusPollRef.current);
       }
     };
-  }, [status.isRecording, isExternalRecording]);
-
-  // Start recording
-  const startRecording = useCallback(async () => {
-    setError(null);
-    try {
-      await invoke("start_recording", { config });
-      setStatus((prev) => ({ ...prev, isRecording: true }));
-    } catch (err) {
-      const errorMessage = String(err);
-      setError(errorMessage);
-      throw err;
-    }
-  }, [config]);
-
-  // Stop recording
-  const stopRecording = useCallback(async () => {
-    setError(null);
-    try {
-      const outputPath = await invoke<string>("stop_recording");
-      setStatus((prev) => ({
-        ...prev,
-        isRecording: false,
-        outputPath,
-      }));
-      return outputPath;
-    } catch (err) {
-      const errorMessage = String(err);
-      setError(errorMessage);
-      throw err;
-    }
-  }, []);
+  }, [isExternalRecording]);
 
   // Update config
   const updateConfig = useCallback((updates: Partial<RecordingConfig>) => {
@@ -333,8 +290,6 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     status,
     devices,
     error,
-    startRecording,
-    stopRecording,
     fetchDevices,
     // Section-based recording
     sectionState,

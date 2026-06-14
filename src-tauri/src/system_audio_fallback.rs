@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use parking_lot::Mutex;
 
-use crate::audio::AudioChunk;
+use crate::system_audio::AudioChunk;
 
 use super::SystemAudioCaptureConfig;
 

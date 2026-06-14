@@ -1,3 +1,12 @@
+/// Represents a chunk of captured audio
+#[derive(Clone)]
+pub struct AudioChunk {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub timestamp: std::time::Duration,
+}
+
 /// System audio capture configuration
 pub struct SystemAudioCaptureConfig {
     /// Target sample rate
