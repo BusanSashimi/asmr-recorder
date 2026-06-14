@@ -34,7 +34,8 @@ import {
 import { toast } from "@/hooks/use-toast";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
-import type { VideoQuality, OutputResolution } from "@/types/recording";
+import type { VideoQuality, OutputResolution, LayoutType, PipPosition } from "@/types/recording";
+import { LAYOUT_LABELS } from "@/lib/layouts";
 
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -298,6 +299,53 @@ export function Toolbar() {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground">
+                    Layout
+                  </Label>
+                  <Select
+                    value={externalConfig.layout}
+                    onValueChange={(value: LayoutType) =>
+                      updateExternalConfig({ layout: value })
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(Object.entries(LAYOUT_LABELS) as [LayoutType, string][]).map(
+                        ([key, label]) => (
+                          <SelectItem key={key} value={key}>
+                            {label}
+                          </SelectItem>
+                        )
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {externalConfig.layout === "pip" && (
+                    <div className="space-y-2 pt-1">
+                      <Label className="text-xs text-muted-foreground">
+                        PiP Corner
+                      </Label>
+                      <Select
+                        value={externalConfig.pipPosition}
+                        onValueChange={(value: PipPosition) =>
+                          updateExternalConfig({ pipPosition: value })
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="top-left">Top Left</SelectItem>
+                          <SelectItem value="top-right">Top Right</SelectItem>
+                          <SelectItem value="bottom-left">Bottom Left</SelectItem>
+                          <SelectItem value="bottom-right">Bottom Right</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

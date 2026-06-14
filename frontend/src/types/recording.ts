@@ -2,6 +2,8 @@
 
 export type PipPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
+export type LayoutType = "grid-2x2" | "solo" | "side-by-side" | "pip";
+
 export type VideoQuality = "low" | "medium" | "high";
 
 // Output resolution presets (all 16:9 aspect ratio)
@@ -66,6 +68,8 @@ export const defaultRecordingConfig: RecordingConfig = {
 export interface ExternalRecordingConfig {
   /** Whether to capture microphone audio */
   captureMic: boolean;
+  /** Device ID of the mic to use (undefined = OS default) */
+  micDeviceId?: string;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
   /** Output file path (optional, will generate if not provided) */
@@ -80,6 +84,12 @@ export interface ExternalRecordingConfig {
   outputWidth: number;
   /** Output height in pixels (must match frames sent from frontend) */
   outputHeight: number;
+  /** Composition layout */
+  layout: LayoutType;
+  /** PiP overlay corner (only used when layout === "pip") */
+  pipPosition: PipPosition;
+  /** PiP overlay size as fraction of output width (only used when layout === "pip") */
+  pipSize: number;
 }
 
 export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
@@ -90,6 +100,9 @@ export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
   outputResolution: "qhd1440",
   outputWidth: 2560,
   outputHeight: 1440,
+  layout: "grid-2x2",
+  pipPosition: "top-right",
+  pipSize: 0.25,
 };
 
 export function formatDuration(ms: number): string {

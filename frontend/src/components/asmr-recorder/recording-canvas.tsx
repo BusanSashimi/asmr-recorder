@@ -12,7 +12,8 @@ import {
   startNativeSystemAudioStream,
   stopNativeSystemAudioStream,
 } from "@/lib/native-system-audio";
-import type { ScreenRegion } from "@/types/recording";
+import type { ScreenRegion, PipPosition, LayoutType } from "@/types/recording";
+import { computeSlots } from "@/lib/layouts";
 
 interface SectionSource {
   type: "video" | "canvas" | null;
@@ -42,8 +43,16 @@ interface RecordingCanvasProps {
   ];
   /** Whether to capture microphone audio */
   captureMic: boolean;
+  /** Device ID of the mic to use (undefined = OS default) */
+  micDeviceId?: string;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
+  /** Composition layout */
+  layout: LayoutType;
+  /** PiP overlay corner (only used when layout === "pip") */
+  pipPosition: PipPosition;
+  /** PiP overlay size as fraction of output width (only used when layout === "pip") */
+  pipSize: number;
 }
 
 export interface RecordingCanvasRef {
@@ -75,6 +84,29 @@ const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_NUM_CHANNELS = 2;
 const AUDIO_BITRATE = 256_000;
 const AAC_CODEC = "mp4a.40.2";
+
+// Returns a centered source crop rect so the source fills the dest without
+// distortion (analogous to CSS object-fit:cover). Returns null when source
+// dimensions are unknown (caller falls back to the stretch form).
+function computeCoverCrop(
+  srcW: number,
+  srcH: number,
+  destW: number,
+  destH: number,
+): { sx: number; sy: number; sw: number; sh: number } | null {
+  if (srcW <= 0 || srcH <= 0 || destW <= 0 || destH <= 0) return null;
+  const srcAR = srcW / srcH;
+  const destAR = destW / destH;
+  if (srcAR > destAR) {
+    // source is wider than dest: crop the sides
+    const sw = srcH * destAR;
+    return { sx: (srcW - sw) / 2, sy: 0, sw, sh: srcH };
+  } else {
+    // source is taller than dest: crop top/bottom
+    const sh = srcW / destAR;
+    return { sx: 0, sy: (srcH - sh) / 2, sw: srcW, sh };
+  }
+}
 
 /**
  * Extract the bare AudioSpecificConfig (ASC) from an AAC decoderConfig
@@ -149,7 +181,7 @@ const extractAudioSpecificConfig = (
 };
 
 /**
- * RecordingCanvas - Composites 4 section sources into a 2x2 grid and records to MP4
+ * RecordingCanvas - Composites section sources using the active layout and records to MP4.
  *
  * Uses WebCodecs API + mp4-muxer for hardware-accelerated H.264 MP4 output.
  * Falls back to MediaRecorder (WebM) if WebCodecs is unavailable.
@@ -167,12 +199,14 @@ export const RecordingCanvas = forwardRef<
     sectionSources,
     getSectionSources,
     captureMic,
+    micDeviceId,
     captureSystemAudio,
+    layout,
+    pipPosition,
+    pipSize,
   },
   ref,
 ) {
-  const sectionWidth = outputWidth / 2;
-  const sectionHeight = outputHeight / 2;
   const recordingWidth = Math.floor(outputWidth * RECORDING_SCALE);
   const recordingHeight = Math.floor(outputHeight * RECORDING_SCALE);
 
@@ -210,7 +244,11 @@ export const RecordingCanvas = forwardRef<
   const audioProcessingCleanupRef = useRef<(() => void) | null>(null);
   const nativeSystemAudioCleanupRef = useRef<(() => void) | null>(null);
   const captureMicRef = useRef(captureMic);
+  const micDeviceIdRef = useRef(micDeviceId);
   const captureSystemAudioRef = useRef(captureSystemAudio);
+  const layoutRef = useRef(layout);
+  const pipPositionRef = useRef(pipPosition);
+  const pipSizeRef = useRef(pipSize);
 
   // Update refs when props change
   useEffect(() => {
@@ -221,7 +259,11 @@ export const RecordingCanvas = forwardRef<
     frameRateRef.current = frameRate;
     onFrameErrorRef.current = onFrameError;
     captureMicRef.current = captureMic;
+    micDeviceIdRef.current = micDeviceId;
     captureSystemAudioRef.current = captureSystemAudio;
+    layoutRef.current = layout;
+    pipPositionRef.current = pipPosition;
+    pipSizeRef.current = pipSize;
   }, [
     sectionSources,
     getSectionSources,
@@ -230,7 +272,11 @@ export const RecordingCanvas = forwardRef<
     frameRate,
     onFrameError,
     captureMic,
+    micDeviceId,
     captureSystemAudio,
+    layout,
+    pipPosition,
+    pipSize,
   ]);
 
   // Expose methods via ref
@@ -250,6 +296,7 @@ export const RecordingCanvas = forwardRef<
       destY: number,
       destWidth: number,
       destHeight: number,
+      fit: "fill" | "cover" = "fill",
     ) => {
       if (!source.element || source.type === null) {
         ctx.fillStyle = "#1a1a1a";
@@ -268,19 +315,37 @@ export const RecordingCanvas = forwardRef<
               // rAF-driven intermediate canvas (which freezes when the window
               // is occluded and adds a redundant copy).
               const { x, y, width, height } = source.region;
-              ctx.drawImage(
-                video,
-                x,
-                y,
-                width,
-                height,
-                destX,
-                destY,
-                destWidth,
-                destHeight,
-              );
+              if (fit === "cover") {
+                const crop = computeCoverCrop(width, height, destWidth, destHeight);
+                if (crop) {
+                  ctx.drawImage(video, x + crop.sx, y + crop.sy, crop.sw, crop.sh, destX, destY, destWidth, destHeight);
+                } else {
+                  ctx.drawImage(video, x, y, width, height, destX, destY, destWidth, destHeight);
+                }
+              } else {
+                ctx.drawImage(
+                  video,
+                  x,
+                  y,
+                  width,
+                  height,
+                  destX,
+                  destY,
+                  destWidth,
+                  destHeight,
+                );
+              }
             } else {
-              ctx.drawImage(video, destX, destY, destWidth, destHeight);
+              if (fit === "cover") {
+                const crop = computeCoverCrop(video.videoWidth, video.videoHeight, destWidth, destHeight);
+                if (crop) {
+                  ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, destX, destY, destWidth, destHeight);
+                } else {
+                  ctx.drawImage(video, destX, destY, destWidth, destHeight);
+                }
+              } else {
+                ctx.drawImage(video, destX, destY, destWidth, destHeight);
+              }
             }
           } else {
             if (
@@ -297,7 +362,16 @@ export const RecordingCanvas = forwardRef<
         } else if (source.type === "canvas") {
           const canvas = source.element as HTMLCanvasElement;
           if (canvas.width > 0 && canvas.height > 0) {
-            ctx.drawImage(canvas, destX, destY, destWidth, destHeight);
+            if (fit === "cover") {
+              const crop = computeCoverCrop(canvas.width, canvas.height, destWidth, destHeight);
+              if (crop) {
+                ctx.drawImage(canvas, crop.sx, crop.sy, crop.sw, crop.sh, destX, destY, destWidth, destHeight);
+              } else {
+                ctx.drawImage(canvas, destX, destY, destWidth, destHeight);
+              }
+            } else {
+              ctx.drawImage(canvas, destX, destY, destWidth, destHeight);
+            }
           } else {
             if (frameCountRef.current < 5) {
               console.warn(
@@ -373,45 +447,39 @@ export const RecordingCanvas = forwardRef<
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, outputWidth, outputHeight);
 
-    // 2x2 grid layout
-    drawSection(ctx, currentSources[0], 0, 0, sectionWidth, sectionHeight);
-    drawSection(
-      ctx,
-      currentSources[1],
-      sectionWidth,
-      0,
-      sectionWidth,
-      sectionHeight,
-    );
-    drawSection(
-      ctx,
-      currentSources[2],
-      0,
-      sectionHeight,
-      sectionWidth,
-      sectionHeight,
-    );
-    drawSection(
-      ctx,
-      currentSources[3],
-      sectionWidth,
-      sectionHeight,
-      sectionWidth,
-      sectionHeight,
-    );
+    // Draw slots in slot order (first = behind, last = on top for z-ordering)
+    const slots = computeSlots(layoutRef.current, {
+      pipPosition: pipPositionRef.current,
+      pipSize: pipSizeRef.current,
+    });
+    for (const slot of slots) {
+      drawSection(
+        ctx,
+        currentSources[slot.section],
+        slot.x * outputWidth,
+        slot.y * outputHeight,
+        slot.w * outputWidth,
+        slot.h * outputHeight,
+        slot.fit,
+      );
+    }
 
-    // Grid lines
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(sectionWidth, 0);
-    ctx.lineTo(sectionWidth, outputHeight);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(0, sectionHeight);
-    ctx.lineTo(outputWidth, sectionHeight);
-    ctx.stroke();
-  }, [outputWidth, outputHeight, sectionWidth, sectionHeight, drawSection]);
+    // Subtle center cross only for the 2×2 layout
+    if (layoutRef.current === "grid-2x2") {
+      const sw = outputWidth / 2;
+      const sh = outputHeight / 2;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sw, 0);
+      ctx.lineTo(sw, outputHeight);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, sh);
+      ctx.lineTo(outputWidth, sh);
+      ctx.stroke();
+    }
+  }, [outputWidth, outputHeight, drawSection]);
 
   /**
    * Save recording data to the Tauri backend
@@ -460,6 +528,7 @@ export const RecordingCanvas = forwardRef<
           // warn about anything the platform silently kept on.
           const micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
+              ...(micDeviceIdRef.current ? { deviceId: { exact: micDeviceIdRef.current } } : {}),
               echoCancellation: false,
               noiseSuppression: false,
               autoGainControl: false,

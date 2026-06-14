@@ -27,6 +27,7 @@ import { RecordingCanvas } from "./recording-canvas";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { toast } from "@/hooks/use-toast";
 import { hasMediaApi } from "@/lib/utils";
+import { computeSlots } from "@/lib/layouts";
 import {
   startNativeScreenStream,
   stopNativeScreenStream,
@@ -734,14 +735,27 @@ export function Preview({ isRecording = false }: PreviewProps) {
             maxHeight: "100%",
           }}
         >
-          {/* 4-Section Grid - maintains 16:9 within the card */}
-          <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 gap-1 p-1">
-            {[0, 1, 2, 3].map((index) => (
-              <div key={index} className="relative">
-                {renderSectionContent(index)}
-              </div>
-            ))}
-          </div>
+          {/* Layout slots — geometry driven by computeSlots so preview matches recording exactly */}
+          {computeSlots(externalConfig.layout, {
+            pipPosition: externalConfig.pipPosition,
+            pipSize: externalConfig.pipSize,
+          }).map((slot, i) => (
+            <div
+              key={`${slot.section}-${i}`}
+              style={{
+                position: "absolute",
+                left: `${slot.x * 100}%`,
+                top: `${slot.y * 100}%`,
+                width: `${slot.w * 100}%`,
+                height: `${slot.h * 100}%`,
+                zIndex: i + 1,
+                padding: externalConfig.layout === "grid-2x2" ? 2 : 0,
+                boxSizing: "border-box",
+              }}
+            >
+              {renderSectionContent(slot.section)}
+            </div>
+          ))}
 
         {/* Recording overlay - shows when recording is active */}
         {isRecording && (
@@ -870,6 +884,9 @@ export function Preview({ isRecording = false }: PreviewProps) {
         getSectionSources={getSectionSources}
         captureMic={externalConfig.captureMic}
         captureSystemAudio={externalConfig.captureSystemAudio}
+        layout={externalConfig.layout}
+        pipPosition={externalConfig.pipPosition}
+        pipSize={externalConfig.pipSize}
       />
     </div>
   );
