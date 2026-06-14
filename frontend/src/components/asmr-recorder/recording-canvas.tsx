@@ -47,6 +47,10 @@ interface RecordingCanvasProps {
   micDeviceId?: string;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
+  /** Mic gain multiplier (1.0 = unity) */
+  micGain: number;
+  /** System audio gain multiplier (1.0 = unity) */
+  systemAudioGain: number;
   /** Composition layout */
   layout: LayoutType;
   /** PiP overlay corner (only used when layout === "pip") */
@@ -75,7 +79,7 @@ const KEYFRAME_INTERVAL_SECONDS = 1;
 // Backpressure: when the WebCodecs encoder has more than this many frames still
 // queued, skip the current composite+encode tick so the queue can't grow without
 // bound (and the main thread isn't loaded with work the encoder can't keep up with).
-const ENCODE_QUEUE_LIMIT = 2;
+const ENCODE_QUEUE_LIMIT = 4;
 
 // Audio encoding constants
 // ASMR audio is the priority: capture in stereo (binaural cues) at a high AAC
@@ -201,6 +205,8 @@ export const RecordingCanvas = forwardRef<
     captureMic,
     micDeviceId,
     captureSystemAudio,
+    micGain,
+    systemAudioGain,
     layout,
     pipPosition,
     pipSize,
@@ -243,9 +249,13 @@ export const RecordingCanvas = forwardRef<
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioProcessingCleanupRef = useRef<(() => void) | null>(null);
   const nativeSystemAudioCleanupRef = useRef<(() => void) | null>(null);
+  const micGainNodeRef = useRef<GainNode | null>(null);
+  const systemAudioGainNodeRef = useRef<GainNode | null>(null);
   const captureMicRef = useRef(captureMic);
   const micDeviceIdRef = useRef(micDeviceId);
   const captureSystemAudioRef = useRef(captureSystemAudio);
+  const micGainRef = useRef(micGain);
+  const systemAudioGainRef = useRef(systemAudioGain);
   const layoutRef = useRef(layout);
   const pipPositionRef = useRef(pipPosition);
   const pipSizeRef = useRef(pipSize);
@@ -261,9 +271,15 @@ export const RecordingCanvas = forwardRef<
     captureMicRef.current = captureMic;
     micDeviceIdRef.current = micDeviceId;
     captureSystemAudioRef.current = captureSystemAudio;
+    micGainRef.current = micGain;
+    systemAudioGainRef.current = systemAudioGain;
     layoutRef.current = layout;
     pipPositionRef.current = pipPosition;
     pipSizeRef.current = pipSize;
+    // Live-update gain nodes if recording is already active (smooth ramp to avoid clicks).
+    const t = audioContextRef.current?.currentTime ?? 0;
+    micGainNodeRef.current?.gain.setTargetAtTime(micGain, t, 0.02);
+    systemAudioGainNodeRef.current?.gain.setTargetAtTime(systemAudioGain, t, 0.02);
   }, [
     sectionSources,
     getSectionSources,
@@ -274,6 +290,8 @@ export const RecordingCanvas = forwardRef<
     captureMic,
     micDeviceId,
     captureSystemAudio,
+    micGain,
+    systemAudioGain,
     layout,
     pipPosition,
     pipSize,
@@ -591,30 +609,40 @@ export const RecordingCanvas = forwardRef<
 
       if (audioStreams.length === 0 && !wantNativeSystemAudio) return null;
 
-      // Force a mixing AudioContext when native system audio is requested so the
-      // native stream has a destination node to connect to, even if mic is the
-      // only MediaStream source (or there are no MediaStream sources at all).
-      const needsMixContext = audioStreams.length > 1 || wantNativeSystemAudio;
-
-      if (!needsMixContext) {
-        const track = audioStreams[0].getAudioTracks()[0] || null;
-        audioStreamRef.current = new MediaStream(
-          audioStreams.flatMap((s) => s.getAudioTracks()),
-        );
-        return track;
-      }
-
+      // Always use a mixing AudioContext so gain nodes can be applied regardless
+      // of how many streams are active.
       const audioContext = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
       audioContextRef.current = audioContext;
       const destination = audioContext.createMediaStreamDestination();
 
-      for (const stream of audioStreams) {
-        const source = audioContext.createMediaStreamSource(stream);
-        source.connect(destination);
+      // Mic stream is always first in audioStreams (added above before sysStream).
+      const micStream = wantMic ? audioStreams[0] ?? null : null;
+      const sysStream = !wantNativeSystemAudio && wantSystemAudio ? audioStreams[audioStreams.length - 1] ?? null : null;
+
+      if (micStream) {
+        const source = audioContext.createMediaStreamSource(micStream);
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = micGainRef.current;
+        source.connect(gainNode);
+        gainNode.connect(destination);
+        micGainNodeRef.current = gainNode;
+      }
+
+      if (sysStream) {
+        const source = audioContext.createMediaStreamSource(sysStream);
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = systemAudioGainRef.current;
+        source.connect(gainNode);
+        gainNode.connect(destination);
+        systemAudioGainNodeRef.current = gainNode;
       }
 
       if (wantNativeSystemAudio) {
-        await startNativeSystemAudioStream(0, audioContext, destination, {
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = systemAudioGainRef.current;
+        gainNode.connect(destination);
+        systemAudioGainNodeRef.current = gainNode;
+        await startNativeSystemAudioStream(0, audioContext, gainNode, {
           sampleRate: audioContext.sampleRate,
           channels: AUDIO_NUM_CHANNELS,
         }).catch((err) =>
@@ -1131,18 +1159,29 @@ export const RecordingCanvas = forwardRef<
           `[RecordingCanvas] Recording started (${method}): ${width}x${height} @ ${fps}fps${audioTrack ? " + audio" : ""}`,
         );
 
-        // Composite frames at the target frame rate
+        // Composite frames at the target frame rate.
+        // requestAnimationFrame gives display-synchronized timing; the drift-free
+        // accumulator (timestamp - elapsed % intervalMs) prevents missed ticks from
+        // creating debt that would otherwise burst frames on the next tick.
         const intervalMs = 1000 / fps;
-        frameIntervalRef.current = window.setInterval(() => {
-          try {
-            updateFrame();
-          } catch (error) {
-            console.error(
-              `[RecordingCanvas] Error in frame loop at frame ${frameCountRef.current}:`,
-              error,
-            );
+        let lastRenderTime = 0;
+        const rAFLoop = (timestamp: number) => {
+          if (frameIntervalRef.current === null) return;
+          const elapsed = timestamp - lastRenderTime;
+          if (elapsed >= intervalMs - 1) {
+            lastRenderTime = timestamp - (elapsed % intervalMs);
+            try {
+              updateFrame();
+            } catch (error) {
+              console.error(
+                `[RecordingCanvas] Error in frame loop at frame ${frameCountRef.current}:`,
+                error,
+              );
+            }
           }
-        }, intervalMs);
+          frameIntervalRef.current = window.requestAnimationFrame(rAFLoop);
+        };
+        frameIntervalRef.current = window.requestAnimationFrame(rAFLoop);
 
         // Watchdog to detect stalls
         watchdogIntervalRef.current = window.setInterval(() => {
@@ -1171,7 +1210,7 @@ export const RecordingCanvas = forwardRef<
       console.log(`[RecordingCanvas] Cleanup - stopping recording`);
 
       if (frameIntervalRef.current !== null) {
-        clearInterval(frameIntervalRef.current);
+        window.cancelAnimationFrame(frameIntervalRef.current);
         frameIntervalRef.current = null;
       }
       if (watchdogIntervalRef.current !== null) {

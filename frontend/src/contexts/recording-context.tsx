@@ -60,12 +60,12 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [isExternalRecording, setIsExternalRecording] = useState(false);
   const recordingStartTimeRef = useRef<number>(0);
 
-  // Live mic monitor for the timeline's Audio Track section. Decoupled from the
-  // recording pipeline (recording-canvas opens its own mic). Gated to run ONLY
-  // while recording with the mic enabled, so it doesn't hold the mic open — and
-  // light the OS mic indicator — when idle.
+  // Live mic monitor for the timeline's Audio Track section and the gain sliders
+  // in the Settings dialog. Decoupled from the recording pipeline (recording-canvas
+  // opens its own mic). Runs whenever the mic is enabled so the level meter is
+  // visible when adjusting gain, which is only useful before/after recording.
   const audioMonitor = useAudioMonitor(
-    status.isRecording && externalConfig.captureMic,
+    externalConfig.captureMic,
     externalConfig.micDeviceId,
   );
 

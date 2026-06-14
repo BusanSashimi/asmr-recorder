@@ -31,11 +31,13 @@ import {
   Video,
   Volume2,
 } from "lucide-react";
+import { Slider } from "@/components/ui/slider";
 import { toast } from "@/hooks/use-toast";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
 import type { VideoQuality, OutputResolution, LayoutType, PipPosition } from "@/types/recording";
 import { LAYOUT_LABELS } from "@/lib/layouts";
+import { StereoMeter } from "./audio-monitor-graphics";
 
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -46,6 +48,7 @@ export function Toolbar() {
     devices,
     sectionState,
     browserDevices,
+    audioMonitor,
     // External frame recording (for 4-section preview)
     externalConfig,
     updateExternalConfig,
@@ -195,18 +198,28 @@ export function Toolbar() {
                 Audio Sources
               </h4>
               <div className="space-y-3 pl-6">
+                {/* Microphone row */}
                 <div className="flex items-center justify-between">
                   <Label htmlFor="mic-capture" className="flex items-center gap-2">
                     <Mic className="h-4 w-4" />
                     Microphone
                   </Label>
-                  <Switch
-                    id="mic-capture"
-                    checked={externalConfig.captureMic}
-                    onCheckedChange={(checked) =>
-                      updateExternalConfig({ captureMic: checked })
-                    }
-                  />
+                  <div className="flex items-center gap-2">
+                    {externalConfig.captureMic && (
+                      <StereoMeter
+                        analyserL={audioMonitor.analyserL}
+                        analyserR={audioMonitor.analyserR}
+                        className="rounded"
+                      />
+                    )}
+                    <Switch
+                      id="mic-capture"
+                      checked={externalConfig.captureMic}
+                      onCheckedChange={(checked) =>
+                        updateExternalConfig({ captureMic: checked })
+                      }
+                    />
+                  </div>
                 </div>
                 {externalConfig.captureMic && browserDevices.filter(d => d.kind === "audioinput").length > 1 && (
                   <div className="space-y-1">
@@ -232,6 +245,25 @@ export function Toolbar() {
                     </Select>
                   </div>
                 )}
+                {/* Mic gain slider */}
+                {externalConfig.captureMic && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-muted-foreground">Mic Gain</Label>
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        {Math.round(externalConfig.micGain * 100)}%
+                      </span>
+                    </div>
+                    <Slider
+                      min={0}
+                      max={3}
+                      step={0.05}
+                      value={[externalConfig.micGain]}
+                      onValueChange={([v]) => updateExternalConfig({ micGain: v })}
+                    />
+                  </div>
+                )}
+                {/* System Audio row */}
                 <div className="flex items-center justify-between">
                   <Label
                     htmlFor="system-audio"
@@ -256,6 +288,24 @@ export function Toolbar() {
                     disabled={!devices?.hasSystemAudio}
                   />
                 </div>
+                {/* System audio gain slider */}
+                {externalConfig.captureSystemAudio && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs text-muted-foreground">System Audio Gain</Label>
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        {Math.round(externalConfig.systemAudioGain * 100)}%
+                      </span>
+                    </div>
+                    <Slider
+                      min={0}
+                      max={3}
+                      step={0.05}
+                      value={[externalConfig.systemAudioGain]}
+                      onValueChange={([v]) => updateExternalConfig({ systemAudioGain: v })}
+                    />
+                  </div>
+                )}
               </div>
             </div>
 

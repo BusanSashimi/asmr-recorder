@@ -70,8 +70,12 @@ export interface ExternalRecordingConfig {
   captureMic: boolean;
   /** Device ID of the mic to use (undefined = OS default) */
   micDeviceId?: string;
+  /** Mic gain multiplier (1.0 = unity, 0–3) */
+  micGain: number;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
+  /** System audio gain multiplier (1.0 = unity, 0–3) */
+  systemAudioGain: number;
   /** Output file path (optional, will generate if not provided) */
   outputPath?: string;
   /** Video quality preset */
@@ -94,9 +98,11 @@ export interface ExternalRecordingConfig {
 
 export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
   captureMic: true,
+  micGain: 1.0,
   captureSystemAudio: false,
+  systemAudioGain: 1.0,
   videoQuality: "medium",
-  frameRate: 60,
+  frameRate: 30,
   outputResolution: "qhd1440",
   outputWidth: 2560,
   outputHeight: 1440,
