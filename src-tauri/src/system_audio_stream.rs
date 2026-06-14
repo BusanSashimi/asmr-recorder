@@ -57,7 +57,7 @@ pub struct SystemAudioStreamState {
 /// Start streaming system audio for a section to the frontend over `on_chunk`.
 ///
 /// Wire format — 16-byte LE header + interleaved f32 PCM:
-/// ```
+/// ```text
 /// bytes 0..4  : u32 sample_rate
 /// bytes 4..6  : u16 channels
 /// bytes 6..8  : u16 reserved (0)
