@@ -66,6 +66,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   // light the OS mic indicator — when idle.
   const audioMonitor = useAudioMonitor(
     status.isRecording && externalConfig.captureMic,
+    externalConfig.micDeviceId,
   );
 
   // Fetch available devices from Tauri backend

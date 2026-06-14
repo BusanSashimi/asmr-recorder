@@ -45,6 +45,7 @@ export function Toolbar() {
     status,
     devices,
     sectionState,
+    browserDevices,
     // External frame recording (for 4-section preview)
     externalConfig,
     updateExternalConfig,
@@ -207,6 +208,30 @@ export function Toolbar() {
                     }
                   />
                 </div>
+                {externalConfig.captureMic && browserDevices.filter(d => d.kind === "audioinput").length > 1 && (
+                  <div className="space-y-1">
+                    <Select
+                      value={externalConfig.micDeviceId ?? "default"}
+                      onValueChange={(value) =>
+                        updateExternalConfig({ micDeviceId: value === "default" ? undefined : value })
+                      }
+                    >
+                      <SelectTrigger className="w-full h-8 text-xs">
+                        <SelectValue placeholder="Default microphone" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="default">Default microphone</SelectItem>
+                        {browserDevices
+                          .filter((d) => d.kind === "audioinput")
+                          .map((d) => (
+                            <SelectItem key={d.deviceId} value={d.deviceId}>
+                              {d.label || `Microphone ${d.deviceId.slice(0, 8)}`}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <Label
                     htmlFor="system-audio"

@@ -883,6 +883,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
         sectionSources={sectionSources}
         getSectionSources={getSectionSources}
         captureMic={externalConfig.captureMic}
+        micDeviceId={externalConfig.micDeviceId}
         captureSystemAudio={externalConfig.captureSystemAudio}
         layout={externalConfig.layout}
         pipPosition={externalConfig.pipPosition}

@@ -35,7 +35,7 @@ const IDLE: AudioMonitorState = {
   analyserMix: null,
 };
 
-export function useAudioMonitor(enabled: boolean): AudioMonitorState {
+export function useAudioMonitor(enabled: boolean, deviceId?: string): AudioMonitorState {
   const [state, setState] = useState<AudioMonitorState>(IDLE);
 
   useEffect(() => {
@@ -66,6 +66,7 @@ export function useAudioMonitor(enabled: boolean): AudioMonitorState {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
+            ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: false,
@@ -155,7 +156,7 @@ export function useAudioMonitor(enabled: boolean): AudioMonitorState {
       setState(IDLE);
       teardown();
     };
-  }, [enabled]);
+  }, [enabled, deviceId]);
 
   return state;
 }
