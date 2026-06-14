@@ -62,32 +62,6 @@ impl ScreenFrame {
         rgba
     }
 
-    /// Get BGRA data with stride padding removed (fast path - no color conversion)
-    ///
-    /// This is much faster than to_rgba() because it only handles stride alignment
-    /// without doing any per-pixel color channel swapping.
-    pub fn to_packed_bgra(&self) -> Vec<u8> {
-        let row_bytes = (self.width * 4) as usize;
-
-        // Fast path: if stride matches expected row size, data is already tightly packed
-        if self.stride == row_bytes {
-            // Just return a clone of the relevant portion
-            let total_bytes = row_bytes * self.height as usize;
-            return self.data[..total_bytes].to_vec();
-        }
-
-        // Slow path: need to remove padding from each row
-        let output_size = row_bytes * self.height as usize;
-        let mut bgra = Vec::with_capacity(output_size);
-
-        for y in 0..self.height as usize {
-            let row_start = y * self.stride;
-            bgra.extend_from_slice(&self.data[row_start..row_start + row_bytes]);
-        }
-
-        bgra
-    }
-
 }
 
 /// Screen capture configuration
@@ -138,47 +112,6 @@ pub use screen_windows::ScreenCapture;
 mod screen_fallback;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use screen_fallback::ScreenCapture;
-
-/// Legacy Tauri command for backward compatibility
-#[command]
-pub fn start_screen_capture() {
-    println!("Starting screen capture...");
-
-    #[cfg(target_os = "macos")]
-    {
-        match screencapturekit::prelude::SCShareableContent::get() {
-            Ok(content) if !content.displays().is_empty() => {
-                let display = &content.displays()[0];
-                println!("Primary display found: {}x{}", display.width(), display.height());
-                println!("Screen capture initialized (use new recording API for actual capture).");
-            }
-            Ok(_) => println!("No displays found"),
-            Err(e) => println!("Failed to access displays: {}", e),
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        match windows_capture::monitor::Monitor::primary() {
-            Ok(display) => {
-                println!("Primary display found: {}x{}", display.width(), display.height());
-                println!("Screen capture initialized (use new recording API for actual capture).");
-            }
-            Err(e) => println!("Failed to find primary display: {}", e),
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        match scrap::Display::primary() {
-            Ok(display) => {
-                println!("Primary display found: {}x{}", display.width(), display.height());
-                println!("Screen capture initialized (use new recording API for actual capture).");
-            }
-            Err(e) => println!("Failed to find primary display: {}", e),
-        }
-    }
-}
 
 /// Enumerate available displays.
 ///
@@ -236,34 +169,6 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
                 is_primary: true,
             }]),
             Err(e) => Err(format!("Failed to access displays: {}", e)),
-        }
-    }
-}
-
-/// Check if screen recording permission is granted
-#[command]
-pub fn check_screen_recording_permission() -> Result<bool, String> {
-    #[cfg(target_os = "macos")]
-    {
-        match screencapturekit::prelude::SCShareableContent::get() {
-            Ok(content) => Ok(!content.displays().is_empty()),
-            Err(e) => Err(format!("Failed to access displays: {}", e)),
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Ok(windows_capture::monitor::Monitor::primary().is_ok())
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        match scrap::Display::primary() {
-            Ok(display) => match scrap::Capturer::new(display) {
-                Ok(_) => Ok(true),
-                Err(_) => Ok(false),
-            },
-            Err(e) => Err(format!("Failed to access display: {}", e)),
         }
     }
 }
