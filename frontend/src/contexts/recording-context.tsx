@@ -55,8 +55,18 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [sectionState, setSectionState] = useState<SectionState>(defaultSectionState);
   const [browserDevices, setBrowserDevices] = useState<MediaDeviceInfo[]>([]);
 
-  // External frame recording state
-  const [externalConfig, setExternalConfig] = useState<ExternalRecordingConfig>(defaultExternalRecordingConfig);
+  // External frame recording state — initialised from localStorage so layout,
+  // gain, mic/audio toggles, and quality survive across sessions.
+  const [externalConfig, setExternalConfig] = useState<ExternalRecordingConfig>(() => {
+    try {
+      const raw = localStorage.getItem("asmr-recorder:externalConfig");
+      if (!raw) return defaultExternalRecordingConfig;
+      // Merge with defaults so fields added in future versions get their defaults.
+      return { ...defaultExternalRecordingConfig, ...JSON.parse(raw) };
+    } catch {
+      return defaultExternalRecordingConfig;
+    }
+  });
   const [isExternalRecording, setIsExternalRecording] = useState(false);
   const recordingStartTimeRef = useRef<number>(0);
 
@@ -68,6 +78,17 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     externalConfig.captureMic,
     externalConfig.micDeviceId,
   );
+
+  // Persist externalConfig on every change. outputPath is a session-specific
+  // file path that won't be valid next launch, so it is intentionally omitted.
+  useEffect(() => {
+    try {
+      const { outputPath: _omit, ...toSave } = externalConfig;
+      localStorage.setItem("asmr-recorder:externalConfig", JSON.stringify(toSave));
+    } catch {
+      // localStorage unavailable (private browsing, storage quota exceeded, etc.)
+    }
+  }, [externalConfig]);
 
   // Fetch available devices from Tauri backend
   const fetchDevices = useCallback(async () => {
