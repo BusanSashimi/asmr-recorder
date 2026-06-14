@@ -146,8 +146,14 @@ export function Preview({ isRecording = false }: PreviewProps) {
           element: canvasRefs.current[index] || null,
           region: sectionRegions.current[index],
         };
+      } else if (section.source === "camera") {
+        // Camera: use the hidden video element that has the camera stream.
+        return {
+          type: "video",
+          element: sourceVideos.current[index] || null,
+        };
       } else {
-        // Use video for camera or full-screen capture
+        // Full-screen browser capture (no region crop)
         return {
           type: "video",
           element: videoRefs.current[index] || null,
@@ -518,8 +524,17 @@ export function Preview({ isRecording = false }: PreviewProps) {
     // doesn't keep running and masking the camera in the composite.
     stopNativeStreamForSection(selectedSection);
 
+    // Hidden video element for the recording canvas (mirrors the screen path).
+    const sourceVideo = document.createElement("video");
+    sourceVideo.srcObject = stream;
+    sourceVideo.autoplay = true;
+    sourceVideo.muted = true;
+    sourceVideo.playsInline = true;
+    sourceVideos.current[selectedSection] = sourceVideo;
+
     // Handle stream ending
     stream.getVideoTracks()[0].onended = () => {
+      sourceVideos.current[selectedSection] = null;
       clearSection(selectedSection);
       toast({
         title: "Camera disconnected",
@@ -541,6 +556,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
     stopCanvasRendering(index);
     sectionRegions.current[index] = null;
     videoRefs.current[index] = null;
+    sourceVideos.current[index] = null;
 
     // Stop native screen stream if this section had one
     stopNativeStreamForSection(index);
@@ -551,6 +567,20 @@ export function Preview({ isRecording = false }: PreviewProps) {
       description: `Section ${index + 1} has been cleared`,
     });
   };
+
+  // Attach camera streams to their on-screen <video> elements after each
+  // section-state update. The ref isn't set until after the re-render that
+  // follows setSectionSource, so a useEffect is the right hook.
+  useEffect(() => {
+    sectionState.sections.forEach((section, index) => {
+      const videoEl = videoRefs.current[index];
+      if (videoEl && section.source === "camera" && section.stream) {
+        if (videoEl.srcObject !== section.stream) {
+          videoEl.srcObject = section.stream;
+        }
+      }
+    });
+  }, [sectionState.sections]);
 
   // Cleanup on unmount
   useEffect(() => {
