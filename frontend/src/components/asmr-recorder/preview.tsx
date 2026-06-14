@@ -98,6 +98,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
     setActiveSectionIndex,
     externalConfig,
     isExternalRecording,
+    setRecordingAnalysers,
   } = useRecordingContext();
 
   // Build section sources for RecordingCanvas
@@ -915,13 +916,17 @@ export function Preview({ isRecording = false }: PreviewProps) {
         captureMic={externalConfig.captureMic}
         micDeviceId={externalConfig.micDeviceId}
         captureSystemAudio={externalConfig.captureSystemAudio}
+        systemAudioApp={externalConfig.systemAudioApp}
         micGain={externalConfig.micGain}
         micHighpass={externalConfig.micHighpass}
+        micMuted={externalConfig.micMuted}
         systemAudioGain={externalConfig.systemAudioGain}
+        systemAudioMuted={externalConfig.systemAudioMuted}
         layout={externalConfig.layout}
         pipPosition={externalConfig.pipPosition}
         pipSize={externalConfig.pipSize}
         videoQuality={externalConfig.videoQuality}
+        onAnalysersChanged={setRecordingAnalysers}
       />
     </div>
   );

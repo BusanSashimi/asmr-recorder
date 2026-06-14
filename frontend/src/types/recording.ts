@@ -82,8 +82,14 @@ export interface ExternalRecordingConfig {
   micHighpass: boolean;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
+  /** Restrict system audio to a single app by bundle ID (undefined = whole system) */
+  systemAudioApp?: string;
   /** System audio gain multiplier (1.0 = unity, 0–3) */
   systemAudioGain: number;
+  /** Mute the mic source (independent of gain slider) */
+  micMuted: boolean;
+  /** Mute the system audio source (independent of gain slider) */
+  systemAudioMuted: boolean;
   /** Output file path (optional, will generate if not provided) */
   outputPath?: string;
   /** Video quality preset */
@@ -108,8 +114,10 @@ export const defaultExternalRecordingConfig: ExternalRecordingConfig = {
   captureMic: true,
   micGain: 1.0,
   micHighpass: true,
+  micMuted: false,
   captureSystemAudio: false,
   systemAudioGain: 1.0,
+  systemAudioMuted: false,
   videoQuality: "medium",
   frameRate: 30,
   outputResolution: "qhd1440",

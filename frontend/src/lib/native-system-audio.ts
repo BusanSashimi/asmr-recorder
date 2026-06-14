@@ -66,6 +66,8 @@ registerProcessor('ring-buffer-source', RingBufferSourceProcessor);
 export interface SystemAudioOptions {
   sampleRate: number;
   channels: number;
+  /** Bundle ID to restrict capture to a single app; undefined = whole-system mix. */
+  appBundleId?: string;
 }
 
 type AudioSourceResult = {
@@ -201,7 +203,7 @@ export async function startNativeSystemAudioStream(
   destination: AudioNode,
   opts: SystemAudioOptions,
 ): Promise<Channel<ArrayBuffer>> {
-  const { sampleRate, channels } = opts;
+  const { sampleRate, channels, appBundleId } = opts;
 
   const { pushChunk, disconnect } = await buildAudioSource(
     audioCtx,
@@ -249,6 +251,7 @@ export async function startNativeSystemAudioStream(
     sectionIndex,
     sampleRate,
     channels,
+    appBundleId: appBundleId ?? null,
     onChunk: channel,
   });
 

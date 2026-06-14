@@ -3,13 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { defaultRecordingConfig, defaultSectionState, defaultExternalRecordingConfig, OUTPUT_RESOLUTIONS } from "@/types/recording";
 import { hasMediaApi } from "@/lib/utils";
 import { useAudioMonitor, type AudioMonitorState } from "@/hooks/use-audio-monitor";
-import type { 
+import { useSystemAudioMonitor } from "@/hooks/use-system-audio-monitor";
+import type {
   RecordingConfig,
   RecordingStatus,
   DeviceList,
   SectionState,
   RecordingSource,
-  ExternalRecordingConfig 
+  ExternalRecordingConfig
 } from "@/types/recording";
 
 interface RecordingContextValue {
@@ -36,6 +37,11 @@ interface RecordingContextValue {
   stopExternalRecording: () => Promise<string>;
   // Live microphone monitor (active whenever externalConfig.captureMic is on)
   audioMonitor: AudioMonitorState;
+  // Live system-audio monitor (active when captureSystemAudio is on and NOT recording)
+  systemAudioMonitor: AudioMonitorState;
+  // Per-source AnalyserNodes wired inside the recording graph — non-null only while recording
+  recordingAnalysers: { mic: AnalyserNode | null; sys: AnalyserNode | null };
+  setRecordingAnalysers: (mic: AnalyserNode | null, sys: AnalyserNode | null) => void;
 }
 
 const RecordingContext = createContext<RecordingContextValue | null>(null);
@@ -70,20 +76,40 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [isExternalRecording, setIsExternalRecording] = useState(false);
   const recordingStartTimeRef = useRef<number>(0);
 
-  // Live mic monitor for the timeline's Audio Track section and the gain sliders
-  // in the Settings dialog. Decoupled from the recording pipeline (recording-canvas
-  // opens its own mic). Runs whenever the mic is enabled so the level meter is
-  // visible when adjusting gain, which is only useful before/after recording.
+  // Live mic monitor — decoupled from the recording pipeline, runs whenever mic
+  // is enabled so the level meter is visible while adjusting gain.
   const audioMonitor = useAudioMonitor(
     externalConfig.captureMic,
     externalConfig.micDeviceId,
   );
 
-  // Persist externalConfig on every change. outputPath is a session-specific
-  // file path that won't be valid next launch, so it is intentionally omitted.
+  // Live system-audio monitor via SCK — gated off while recording so only one
+  // SCK stream runs at a time (monitor on index 99, recording on index 0).
+  const systemAudioMonitor = useSystemAudioMonitor(
+    externalConfig.captureSystemAudio && !isExternalRecording,
+    externalConfig.systemAudioApp,
+  );
+
+  // Per-source analysers wired inside the recording graph — populated by
+  // RecordingCanvas via the onAnalysersChanged callback, cleared on stop.
+  const [recordingAnalysers, setRecordingAnalysersState] = useState<{
+    mic: AnalyserNode | null;
+    sys: AnalyserNode | null;
+  }>({ mic: null, sys: null });
+
+  const setRecordingAnalysers = useCallback(
+    (mic: AnalyserNode | null, sys: AnalyserNode | null) => {
+      setRecordingAnalysersState({ mic, sys });
+    },
+    [],
+  );
+
+  // Persist externalConfig on every change. outputPath is session-specific and
+  // omitted. micMuted/systemAudioMuted are omitted because persisting a muted
+  // state would silently drop audio on the next launch.
   useEffect(() => {
     try {
-      const { outputPath: _omit, ...toSave } = externalConfig;
+      const { outputPath: _op, micMuted: _mm, systemAudioMuted: _sm, ...toSave } = externalConfig;
       localStorage.setItem("asmr-recorder:externalConfig", JSON.stringify(toSave));
     } catch {
       // localStorage unavailable (private browsing, storage quota exceeded, etc.)
@@ -328,6 +354,9 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     startExternalRecording,
     stopExternalRecording,
     audioMonitor,
+    systemAudioMonitor,
+    recordingAnalysers,
+    setRecordingAnalysers,
   };
 
   return (

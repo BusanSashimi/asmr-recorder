@@ -81,10 +81,30 @@ impl SystemAudioCapture {
         let displays = content.displays();
         let display = displays.first().ok_or_else(|| "No display found".to_string())?;
 
-        let filter = SCContentFilter::create()
-            .with_display(display)
-            .with_excluding_windows(&[])
-            .build();
+        let filter = match &self.config.app_bundle_id {
+            Some(bid) => {
+                let apps = content.applications();
+                let app = apps
+                    .iter()
+                    .find(|a| a.bundle_identifier() == *bid)
+                    .ok_or_else(|| {
+                        format!("App '{}' is not running or not accessible via SCK", bid)
+                    })?;
+                println!(
+                    "System audio capture: per-app filter for '{}' ({})",
+                    app.application_name(),
+                    bid
+                );
+                SCContentFilter::create()
+                    .with_display(display)
+                    .with_including_applications(&[app], &[])
+                    .build()
+            }
+            None => SCContentFilter::create()
+                .with_display(display)
+                .with_excluding_windows(&[])
+                .build(),
+        };
 
         let stream_config = SCStreamConfiguration::new()
             .with_captures_audio(true)
@@ -112,8 +132,14 @@ impl SystemAudioCapture {
         *stream_guard = Some(stream);
 
         println!(
-            "System audio capture started: {}Hz, {} channels",
-            self.config.sample_rate, self.config.channels
+            "System audio capture started: {}Hz, {} channels{}",
+            self.config.sample_rate,
+            self.config.channels,
+            self.config
+                .app_bundle_id
+                .as_deref()
+                .map(|b| format!(", app={}", b))
+                .unwrap_or_default()
         );
 
         Ok(())

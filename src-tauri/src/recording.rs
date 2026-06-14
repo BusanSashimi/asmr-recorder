@@ -3,6 +3,44 @@ use tauri::command;
 
 use crate::system_audio::is_system_audio_available;
 
+/// A running application visible to ScreenCaptureKit.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioApp {
+    pub bundle_id: String,
+    pub name: String,
+    pub pid: i32,
+}
+
+/// Return every running app that SCK can enumerate, sorted by name and deduped
+/// by bundle ID. Used to populate the per-app system-audio picker. Returns an
+/// empty list on non-macOS platforms.
+#[command]
+pub fn list_audio_apps() -> Result<Vec<AudioApp>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use screencapturekit::prelude::SCShareableContent;
+        let content = SCShareableContent::get()
+            .map_err(|e| format!("SCShareableContent::get failed: {}", e))?;
+        let mut apps: Vec<AudioApp> = content
+            .applications()
+            .iter()
+            .filter(|a| !a.application_name().is_empty())
+            .map(|a| AudioApp {
+                bundle_id: a.bundle_identifier(),
+                name: a.application_name(),
+                pid: a.process_id(),
+            })
+            .collect();
+        apps.sort_by(|a, b| a.bundle_id.cmp(&b.bundle_id));
+        apps.dedup_by_key(|a| a.bundle_id.clone());
+        apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        return Ok(apps);
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(vec![])
+}
+
 /// Information about available capture devices
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

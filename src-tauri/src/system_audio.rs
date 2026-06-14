@@ -13,6 +13,9 @@ pub struct SystemAudioCaptureConfig {
     pub sample_rate: u32,
     /// Number of channels
     pub channels: u16,
+    /// Restrict capture to a single application by bundle ID (macOS only).
+    /// `None` captures the whole system mix.
+    pub app_bundle_id: Option<String>,
 }
 
 impl Default for SystemAudioCaptureConfig {
@@ -20,6 +23,7 @@ impl Default for SystemAudioCaptureConfig {
         Self {
             sample_rate: 48000,
             channels: 2,
+            app_bundle_id: None,
         }
     }
 }

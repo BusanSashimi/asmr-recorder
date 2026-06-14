@@ -15,6 +15,7 @@ import {
 import type { ScreenRegion, PipPosition, LayoutType, VideoQuality } from "@/types/recording";
 import { VIDEO_QUALITY_BITRATES } from "@/types/recording";
 import { computeSlots } from "@/lib/layouts";
+import { encodeQueueLimit } from "@/lib/encoder-tuning";
 
 interface SectionSource {
   type: "video" | "canvas" | null;
@@ -48,12 +49,18 @@ interface RecordingCanvasProps {
   micDeviceId?: string;
   /** Whether to capture system audio */
   captureSystemAudio: boolean;
+  /** Bundle ID to restrict system audio to one app (undefined = whole-system mix) */
+  systemAudioApp?: string;
   /** Mic gain multiplier (1.0 = unity) */
   micGain: number;
   /** High-pass filter on mic input (~80 Hz) */
   micHighpass: boolean;
+  /** Mute the mic source without touching the gain slider */
+  micMuted: boolean;
   /** System audio gain multiplier (1.0 = unity) */
   systemAudioGain: number;
+  /** Mute the system audio source without touching the gain slider */
+  systemAudioMuted: boolean;
   /** Composition layout */
   layout: LayoutType;
   /** PiP overlay corner (only used when layout === "pip") */
@@ -62,6 +69,8 @@ interface RecordingCanvasProps {
   pipSize: number;
   /** Video quality preset — controls encoder bitrate */
   videoQuality: VideoQuality;
+  /** Called after acquireAudioTrack with the per-source AnalyserNodes (null on stop) */
+  onAnalysersChanged?: (mic: AnalyserNode | null, sys: AnalyserNode | null) => void;
 }
 
 export interface RecordingCanvasRef {
@@ -80,13 +89,13 @@ const H264_CODEC = "avc1.42001f";
 // fine; trim cuts can still land within 3s of the drag point.
 const KEYFRAME_INTERVAL_SECONDS = 3;
 // Backpressure: when the WebCodecs encoder has more than this many frames still
-// queued, skip the current composite+encode tick so the queue can't grow without
-// bound (and the main thread isn't loaded with work the encoder can't keep up with).
-const ENCODE_QUEUE_LIMIT = 4;
+// queued, skip the current composite+encode tick. The limit is computed once per
+// recording session via encodeQueueLimit() and stored in encodeQueueLimitRef so
+// it scales with the recording resolution and fps.
 
 // Audio encoding constants
 // ASMR audio is the priority: capture in stereo (binaural cues) at a high AAC
-// bitrate. 256 kbps is negligible next to the 12 Mbps video budget.
+// bitrate. 256 kbps is negligible next to the quality-based video budget.
 const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_NUM_CHANNELS = 2;
 const AUDIO_BITRATE = 256_000;
@@ -208,13 +217,17 @@ export const RecordingCanvas = forwardRef<
     captureMic,
     micDeviceId,
     captureSystemAudio,
+    systemAudioApp,
     micGain,
     micHighpass,
+    micMuted,
     systemAudioGain,
+    systemAudioMuted,
     layout,
     pipPosition,
     pipSize,
     videoQuality,
+    onAnalysersChanged,
   },
   ref,
 ) {
@@ -226,6 +239,7 @@ export const RecordingCanvas = forwardRef<
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
   const frameIntervalRef = useRef<number | null>(null);
   const droppedFrameCountRef = useRef<number>(0);
+  const encodeQueueLimitRef = useRef(4); // updated at record start via encodeQueueLimit()
   const recordingStartTimeRef = useRef<number>(0);
   const frameCountRef = useRef<number>(0);
   const lastFrameTimeRef = useRef<number>(0);
@@ -258,12 +272,22 @@ export const RecordingCanvas = forwardRef<
   const micGainNodeRef = useRef<GainNode | null>(null);
   const micHighpassNodeRef = useRef<BiquadFilterNode | null>(null);
   const systemAudioGainNodeRef = useRef<GainNode | null>(null);
+  // Leaf AnalyserNodes for record-time per-source metering (passive — no effect on mix)
+  const micRecAnalyserRef = useRef<AnalyserNode | null>(null);
+  const sysRecAnalyserRef = useRef<AnalyserNode | null>(null);
+  const onAnalysersChangedRef = useRef(onAnalysersChanged);
+  // Audio bitrate instrumentation — tracks effective kbps to verify CBR behavior.
+  const audioBytesAccRef = useRef(0);
+  const audioLogWindowStartRef = useRef(-1); // chunk.timestamp of window start (-1 = unset)
   const captureMicRef = useRef(captureMic);
   const micDeviceIdRef = useRef(micDeviceId);
   const captureSystemAudioRef = useRef(captureSystemAudio);
+  const systemAudioAppRef = useRef(systemAudioApp);
   const micGainRef = useRef(micGain);
   const micHighpassRef = useRef(micHighpass);
+  const micMutedRef = useRef(micMuted);
   const systemAudioGainRef = useRef(systemAudioGain);
+  const systemAudioMutedRef = useRef(systemAudioMuted);
   const layoutRef = useRef(layout);
   const pipPositionRef = useRef(pipPosition);
   const pipSizeRef = useRef(pipSize);
@@ -276,19 +300,24 @@ export const RecordingCanvas = forwardRef<
     recordingHeightRef.current = recordingHeight;
     frameRateRef.current = frameRate;
     onFrameErrorRef.current = onFrameError;
+    onAnalysersChangedRef.current = onAnalysersChanged;
     captureMicRef.current = captureMic;
     micDeviceIdRef.current = micDeviceId;
     captureSystemAudioRef.current = captureSystemAudio;
+    systemAudioAppRef.current = systemAudioApp;
     micGainRef.current = micGain;
     micHighpassRef.current = micHighpass;
+    micMutedRef.current = micMuted;
     systemAudioGainRef.current = systemAudioGain;
+    systemAudioMutedRef.current = systemAudioMuted;
     layoutRef.current = layout;
     pipPositionRef.current = pipPosition;
     pipSizeRef.current = pipSize;
-    // Live-update gain nodes if recording is already active (smooth ramp to avoid clicks).
+    // Live-update gain nodes if recording is already active (smooth ramp, no clicks).
+    // Mute overrides the gain slider: effective gain is 0 when muted, slider value otherwise.
     const t = audioContextRef.current?.currentTime ?? 0;
-    micGainNodeRef.current?.gain.setTargetAtTime(micGain, t, 0.02);
-    systemAudioGainNodeRef.current?.gain.setTargetAtTime(systemAudioGain, t, 0.02);
+    micGainNodeRef.current?.gain.setTargetAtTime(micMuted ? 0 : micGain, t, 0.02);
+    systemAudioGainNodeRef.current?.gain.setTargetAtTime(systemAudioMuted ? 0 : systemAudioGain, t, 0.02);
     // Toggle the high-pass filter by switching type — "allpass" passes everything unchanged.
     if (micHighpassNodeRef.current) {
       micHighpassNodeRef.current.type = micHighpass ? "highpass" : "allpass";
@@ -300,12 +329,16 @@ export const RecordingCanvas = forwardRef<
     recordingHeight,
     frameRate,
     onFrameError,
+    onAnalysersChanged,
     captureMic,
     micDeviceId,
     captureSystemAudio,
+    systemAudioApp,
     micGain,
     micHighpass,
+    micMuted,
     systemAudioGain,
+    systemAudioMuted,
     layout,
     pipPosition,
     pipSize,
@@ -642,30 +675,47 @@ export const RecordingCanvas = forwardRef<
         hpf.frequency.value = 80;
         micHighpassNodeRef.current = hpf;
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = micGainRef.current;
+        gainNode.gain.value = micMutedRef.current ? 0 : micGainRef.current;
         source.connect(hpf);
         hpf.connect(gainNode);
         gainNode.connect(destination);
         micGainNodeRef.current = gainNode;
+        // Leaf analyser for record-time metering (passive, no effect on the mix).
+        const micAnalyser = audioContext.createAnalyser();
+        micAnalyser.fftSize = 1024;
+        micAnalyser.smoothingTimeConstant = 0;
+        gainNode.connect(micAnalyser);
+        micRecAnalyserRef.current = micAnalyser;
       }
 
       if (sysStream) {
         const source = audioContext.createMediaStreamSource(sysStream);
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = systemAudioGainRef.current;
+        gainNode.gain.value = systemAudioMutedRef.current ? 0 : systemAudioGainRef.current;
         source.connect(gainNode);
         gainNode.connect(destination);
         systemAudioGainNodeRef.current = gainNode;
+        const sysAnalyser = audioContext.createAnalyser();
+        sysAnalyser.fftSize = 1024;
+        sysAnalyser.smoothingTimeConstant = 0;
+        gainNode.connect(sysAnalyser);
+        sysRecAnalyserRef.current = sysAnalyser;
       }
 
       if (wantNativeSystemAudio) {
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = systemAudioGainRef.current;
+        gainNode.gain.value = systemAudioMutedRef.current ? 0 : systemAudioGainRef.current;
         gainNode.connect(destination);
         systemAudioGainNodeRef.current = gainNode;
+        const sysAnalyser = audioContext.createAnalyser();
+        sysAnalyser.fftSize = 1024;
+        sysAnalyser.smoothingTimeConstant = 0;
+        gainNode.connect(sysAnalyser);
+        sysRecAnalyserRef.current = sysAnalyser;
         await startNativeSystemAudioStream(0, audioContext, gainNode, {
           sampleRate: audioContext.sampleRate,
           channels: AUDIO_NUM_CHANNELS,
+          appBundleId: systemAudioAppRef.current,
         }).catch((err) =>
           console.warn("[Audio] Native system audio stream failed:", err),
         );
@@ -850,6 +900,26 @@ export const RecordingCanvas = forwardRef<
                     });
                   } else {
                     muxer.addAudioChunk(chunk, metadata);
+                  }
+                  // Track effective audio bitrate to verify CBR behavior in WKWebView.
+                  if (audioLogWindowStartRef.current < 0) {
+                    audioLogWindowStartRef.current = chunk.timestamp;
+                  }
+                  audioBytesAccRef.current += chunk.byteLength;
+                  if (chunk.timestamp - audioLogWindowStartRef.current >= 5_000_000) {
+                    const windowSecs =
+                      (chunk.timestamp - audioLogWindowStartRef.current) / 1_000_000;
+                    const effectiveKbps = (
+                      (audioBytesAccRef.current * 8) /
+                      windowSecs /
+                      1000
+                    ).toFixed(0);
+                    console.log(
+                      `[WebCodecs] Audio effective bitrate: ${effectiveKbps} kbps ` +
+                        `(target ${AUDIO_BITRATE / 1000}kbps, CBR attempted)`,
+                    );
+                    audioBytesAccRef.current = 0;
+                    audioLogWindowStartRef.current = chunk.timestamp;
                   }
                 } catch (error) {
                   console.error(
@@ -1067,7 +1137,7 @@ export const RecordingCanvas = forwardRef<
       if (
         useWebCodecsRef.current &&
         encoder &&
-        encoder.encodeQueueSize > ENCODE_QUEUE_LIMIT
+        encoder.encodeQueueSize > encodeQueueLimitRef.current
       ) {
         droppedFrameCountRef.current++;
         return;
@@ -1138,6 +1208,8 @@ export const RecordingCanvas = forwardRef<
         frameCountRef.current = 0;
         droppedFrameCountRef.current = 0;
         lastFrameTimeRef.current = performance.now();
+        audioBytesAccRef.current = 0;
+        audioLogWindowStartRef.current = -1;
 
         const canvas = canvasRef.current;
         if (!canvas) throw new Error("Canvas not available");
@@ -1145,11 +1217,18 @@ export const RecordingCanvas = forwardRef<
         const width = recordingWidthRef.current;
         const height = recordingHeightRef.current;
         const fps = frameRateRef.current;
+        encodeQueueLimitRef.current = encodeQueueLimit(width, height, fps);
 
         // Acquire audio track if mic or system audio is enabled
         const audioTrack = await acquireAudioTrack(
           captureMicRef.current,
           captureSystemAudioRef.current,
+        );
+
+        // Notify caller of per-source analysers (for record-time level meters).
+        onAnalysersChangedRef.current?.(
+          micRecAnalyserRef.current,
+          sysRecAnalyserRef.current,
         );
 
         if (cancelled) {
@@ -1250,6 +1329,11 @@ export const RecordingCanvas = forwardRef<
         nativeSystemAudioCleanupRef.current();
         nativeSystemAudioCleanupRef.current = null;
       }
+
+      // Clear record-time analysers and notify the caller.
+      micRecAnalyserRef.current = null;
+      sysRecAnalyserRef.current = null;
+      onAnalysersChangedRef.current?.(null, null);
 
       // Snapshot the recording method before clearing refs
       const wasUsingWebCodecs = useWebCodecsRef.current;

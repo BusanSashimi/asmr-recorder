@@ -82,6 +82,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             screen::list_displays,
             recording::get_available_devices,
+            recording::list_audio_apps,
             save_media_recording,
             screen_stream::start_screen_stream,
             screen_stream::stop_screen_stream,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -30,16 +30,25 @@ import {
   Settings,
   Video,
   Volume2,
+  VolumeX,
   FolderOpen,
   RotateCcw,
 } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "@/hooks/use-toast";
+import { invoke } from "@tauri-apps/api/core";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
 import type { VideoQuality, OutputResolution, LayoutType, PipPosition } from "@/types/recording";
 import { LAYOUT_LABELS } from "@/lib/layouts";
+import { gainToDb } from "@/lib/gain-to-db";
 import { StereoMeter } from "./audio-monitor-graphics";
+
+interface AudioApp {
+  bundleId: string;
+  name: string;
+  pid: number;
+}
 
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -48,6 +57,9 @@ export function Toolbar() {
   // without requiring the user to locate the saved file on disk.
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Per-app system audio picker — loaded lazily when system audio is enabled
+  const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
+  const audioAppsLoadedRef = useRef(false);
 
   const {
     status,
@@ -55,6 +67,8 @@ export function Toolbar() {
     sectionState,
     browserDevices,
     audioMonitor,
+    systemAudioMonitor,
+    recordingAnalysers,
     // External frame recording (for 4-section preview)
     externalConfig,
     updateExternalConfig,
@@ -62,6 +76,18 @@ export function Toolbar() {
     startExternalRecording,
     stopExternalRecording,
   } = useRecordingContext();
+
+  // Lazy-load the audio app list when system audio is enabled.
+  const loadAudioApps = useCallback(async () => {
+    if (audioAppsLoadedRef.current) return;
+    audioAppsLoadedRef.current = true;
+    try {
+      const apps = await invoke<AudioApp[]>("list_audio_apps");
+      setAudioApps(apps);
+    } catch {
+      // SCK may not have permission yet; leave list empty (shows "Entire system" only)
+    }
+  }, []);
 
   // Track output path changes to show save confirmation toast
   const previousOutputPathRef = useRef(status.outputPath);
@@ -283,13 +309,26 @@ export function Toolbar() {
                     </Select>
                   </div>
                 )}
-                {/* Mic gain slider */}
+                {/* Mic gain slider + mute */}
                 {externalConfig.captureMic && (
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <Label className="text-xs text-muted-foreground">Mic Gain</Label>
+                      <div className="flex items-center gap-1">
+                        <Label className="text-xs text-muted-foreground">Mic Gain</Label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 w-5 p-0"
+                          title={externalConfig.micMuted ? "Unmute mic" : "Mute mic"}
+                          onClick={() => updateExternalConfig({ micMuted: !externalConfig.micMuted })}
+                        >
+                          {externalConfig.micMuted
+                            ? <VolumeX className="h-3 w-3 text-destructive" />
+                            : <Mic className="h-3 w-3" />}
+                        </Button>
+                      </div>
                       <span className="text-xs text-muted-foreground tabular-nums">
-                        {Math.round(externalConfig.micGain * 100)}%
+                        {externalConfig.micMuted ? "muted" : gainToDb(externalConfig.micGain)}
                       </span>
                     </div>
                     <Slider
@@ -298,6 +337,7 @@ export function Toolbar() {
                       step={0.05}
                       value={[externalConfig.micGain]}
                       onValueChange={([v]) => updateExternalConfig({ micGain: v })}
+                      className={externalConfig.micMuted ? "opacity-40" : ""}
                     />
                   </div>
                 )}
@@ -332,22 +372,74 @@ export function Toolbar() {
                       </span>
                     )}
                   </Label>
-                  <Switch
-                    id="system-audio"
-                    checked={externalConfig.captureSystemAudio}
-                    onCheckedChange={(checked) =>
-                      updateExternalConfig({ captureSystemAudio: checked })
-                    }
-                    disabled={!devices?.hasSystemAudio}
-                  />
+                  <div className="flex items-center gap-2">
+                    {externalConfig.captureSystemAudio && !isExternalRecording && (
+                      <StereoMeter
+                        analyserL={systemAudioMonitor.analyserL}
+                        analyserR={systemAudioMonitor.analyserR}
+                        className="rounded"
+                      />
+                    )}
+                    <Switch
+                      id="system-audio"
+                      checked={externalConfig.captureSystemAudio}
+                      onCheckedChange={(checked) => {
+                        updateExternalConfig({ captureSystemAudio: checked });
+                        if (checked) loadAudioApps();
+                      }}
+                      disabled={!devices?.hasSystemAudio}
+                    />
+                  </div>
                 </div>
-                {/* System audio gain slider */}
+                {/* Per-app system audio picker */}
+                {externalConfig.captureSystemAudio && audioApps.length > 0 && (
+                  <div className="space-y-1">
+                    <Select
+                      value={externalConfig.systemAudioApp ?? ""}
+                      onValueChange={(value) =>
+                        updateExternalConfig({
+                          systemAudioApp: value === "" ? undefined : value,
+                        })
+                      }
+                    >
+                      <SelectTrigger className="w-full h-8 text-xs">
+                        <SelectValue placeholder="Entire system (all apps)" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="">Entire system (all apps)</SelectItem>
+                        {audioApps.map((app) => (
+                          <SelectItem key={app.bundleId} value={app.bundleId}>
+                            {app.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {/* System audio gain slider + mute */}
                 {externalConfig.captureSystemAudio && (
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <Label className="text-xs text-muted-foreground">System Audio Gain</Label>
+                      <div className="flex items-center gap-1">
+                        <Label className="text-xs text-muted-foreground">System Audio Gain</Label>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-5 w-5 p-0"
+                          title={externalConfig.systemAudioMuted ? "Unmute system audio" : "Mute system audio"}
+                          onClick={() =>
+                            updateExternalConfig({ systemAudioMuted: !externalConfig.systemAudioMuted })
+                          }
+                        >
+                          {externalConfig.systemAudioMuted
+                            ? <VolumeX className="h-3 w-3 text-destructive" />
+                            : <Volume2 className="h-3 w-3" />}
+                        </Button>
+                      </div>
                       <span className="text-xs text-muted-foreground tabular-nums">
-                        {Math.round(externalConfig.systemAudioGain * 100)}%
+                        {externalConfig.systemAudioMuted
+                          ? "muted"
+                          : gainToDb(externalConfig.systemAudioGain)}
                       </span>
                     </div>
                     <Slider
@@ -356,6 +448,7 @@ export function Toolbar() {
                       step={0.05}
                       value={[externalConfig.systemAudioGain]}
                       onValueChange={([v]) => updateExternalConfig({ systemAudioGain: v })}
+                      className={externalConfig.systemAudioMuted ? "opacity-40" : ""}
                     />
                   </div>
                 )}
@@ -612,7 +705,7 @@ export function Toolbar() {
 
       <div className="flex-1" />
 
-      {/* Recording Indicator */}
+      {/* Recording Indicator + live per-source level meters */}
       {(status.isRecording || isExternalRecording) && (
         <div className="flex items-center gap-2 text-destructive">
           <Circle className="h-3 w-3 fill-current animate-pulse" />
@@ -620,6 +713,20 @@ export function Toolbar() {
           <span className="text-sm font-mono">
             {formatDuration(status.durationMs)}
           </span>
+          {recordingAnalysers.mic && (
+            <StereoMeter
+              analyserL={recordingAnalysers.mic}
+              analyserR={recordingAnalysers.mic}
+              className="rounded"
+            />
+          )}
+          {recordingAnalysers.sys && (
+            <StereoMeter
+              analyserL={recordingAnalysers.sys}
+              analyserR={recordingAnalysers.sys}
+              className="rounded"
+            />
+          )}
         </div>
       )}
 

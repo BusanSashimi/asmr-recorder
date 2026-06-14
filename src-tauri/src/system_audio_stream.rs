@@ -69,17 +69,26 @@ pub async fn start_system_audio_stream(
     section_index: u32,
     sample_rate: u32,
     channels: u16,
+    app_bundle_id: Option<String>,
     on_chunk: Channel<InvokeResponseBody>,
     state: tauri::State<'_, Arc<SystemAudioStreamState>>,
 ) -> Result<(), String> {
+    let bundle_id_display = app_bundle_id
+        .as_deref()
+        .map(|b| format!(", app={}", b))
+        .unwrap_or_default();
+
     let existing = state.streams.lock().remove(&section_index);
     if let Some(existing) = existing {
         existing.stop();
     }
 
-    let mut capture =
-        SystemAudioCapture::new(SystemAudioCaptureConfig { sample_rate, channels })
-            .map_err(|e| format!("Failed to initialize system audio capture: {}", e))?;
+    let mut capture = SystemAudioCapture::new(SystemAudioCaptureConfig {
+        sample_rate,
+        channels,
+        app_bundle_id,
+    })
+    .map_err(|e| format!("Failed to initialize system audio capture: {}", e))?;
 
     let receiver = capture
         .take_receiver()
@@ -168,8 +177,8 @@ pub async fn start_system_audio_stream(
     }
 
     println!(
-        "[system_audio_stream] section {} started: {}Hz, {} channels",
-        section_index, sample_rate, channels
+        "[system_audio_stream] section {} started: {}Hz, {} channels{}",
+        section_index, sample_rate, channels, bundle_id_display
     );
 
     Ok(())
