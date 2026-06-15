@@ -3,6 +3,10 @@ import { parseFrameHeader } from "./screen-wire";
 export type { FrameHeader } from "./screen-wire";
 export { parseFrameHeader } from "./screen-wire";
 
+// Per-section active channels. Keyed by sectionIndex so stopNativeScreenStream
+// can neuter the onmessage closure and drop the capture of onFrame/canvas refs.
+const channels = new Map<number, Channel<ArrayBuffer>>();
+
 /**
  * Native screen capture streamed from the Rust backend.
  *
@@ -71,6 +75,8 @@ export async function startNativeScreenStream(
       .catch((e) => { console.warn("[native-screen] frame decode failed:", e); ack(); });
   };
 
+  channels.set(sectionIndex, channel);
+
   await invoke("start_screen_stream", {
     sectionIndex,
     displayIndex: opts.displayIndex ?? 0,
@@ -90,6 +96,11 @@ export async function listDisplays(): Promise<DisplayInfo[]> {
 
 /** Stop the native screen stream for a section (no-op if none is running). */
 export async function stopNativeScreenStream(sectionIndex: number): Promise<void> {
+  const channel = channels.get(sectionIndex);
+  if (channel) {
+    channel.onmessage = () => {};
+    channels.delete(sectionIndex);
+  }
   try {
     await invoke("stop_screen_stream", { sectionIndex });
   } catch (e) {

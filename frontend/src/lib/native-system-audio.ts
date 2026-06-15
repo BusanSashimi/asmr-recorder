@@ -77,6 +77,8 @@ type AudioSourceResult = {
 
 // Per-section node cleanup fns. Keyed by sectionIndex.
 const cleanups = new Map<number, () => void>();
+// Per-section active stream channels. Neutered on stop to drop the closure.
+const streamChannels = new Map<number, Channel<ArrayBuffer>>();
 
 async function buildAudioSource(
   audioCtx: AudioContext,
@@ -247,6 +249,8 @@ export async function startNativeSystemAudioStream(
     ack();
   };
 
+  streamChannels.set(sectionIndex, channel);
+
   await invoke("start_system_audio_stream", {
     sectionIndex,
     sampleRate,
@@ -260,6 +264,11 @@ export async function startNativeSystemAudioStream(
 
 /** Stop the native system-audio stream for a section and disconnect audio nodes. */
 export function stopNativeSystemAudioStream(sectionIndex: number): void {
+  const channel = streamChannels.get(sectionIndex);
+  if (channel) {
+    channel.onmessage = () => {};
+    streamChannels.delete(sectionIndex);
+  }
   const disconnect = cleanups.get(sectionIndex);
   if (disconnect) {
     disconnect();
