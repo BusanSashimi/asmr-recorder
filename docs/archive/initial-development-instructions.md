@@ -1,3 +1,8 @@
+> **HISTORICAL / OBSOLETE.** This is the project's original bootstrap prompt. It describes a native
+> `cpal`/`scrap`/`ffmpeg` recording design and files (`audio.rs`, `Recorder.tsx`) that were never
+> built or have since been removed; command wiring now lives in `lib.rs`, not `main.rs`. The live
+> architecture is in [/ARCHITECTURE.md](../../ARCHITECTURE.md). Kept for history only.
+
 # 🚀 Mission: ASMR Recorder Initialization
 
 ## Objective

@@ -1,3 +1,8 @@
+> **HISTORICAL / OBSOLETE.** Describes the deleted native FFmpeg / JSON-IPC per-frame recording
+> pipeline (resolution downscaling, `RECORDING_SCALE`, backend frame-receiver logs). The live
+> path is frontend WebCodecs + `mediabunny` + a raw-byte save IPC — see
+> [/ARCHITECTURE.md](../../ARCHITECTURE.md). Kept for history only.
+
 # Debugging Guide for Composite Recording
 
 ## Current Issues Being Investigated

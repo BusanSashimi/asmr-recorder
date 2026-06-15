@@ -15,11 +15,11 @@
 
 ## ✨ Features
 
-- 🎤 **High-Fidelity Audio Recording** — Crystal-clear audio capture powered by `cpal`
-- 🖥️ **Screen Capture** — Seamless screen recording with `scrap`
-- ⚡ **Lightning Fast** — Native performance with Rust backend
-- 🎨 **Modern UI** — Beautiful React + TypeScript interface
-- 📦 **Cross-Platform** — Works on macOS, Windows, and Linux
+- 🎙️ **System + Mic Audio** — Microphone via `getUserMedia`; system / per-app audio captured natively through ScreenCaptureKit (macOS 14+)
+- 🖥️ **Native Screen & Region Capture** — Full-display or cropped-region capture via ScreenCaptureKit, streamed to the UI over a Tauri Channel
+- 🧩 **Multi-Section Composition** — Composite multiple screen/camera sources onto one canvas, encoded in-browser with WebCodecs (H.264)
+- ✂️ **Lossless Trim Editor** — Post-record trimming via `mediabunny` packet-copy (no re-encode)
+- 🍎 **macOS 14+ first** — ScreenCaptureKit-based; non-macOS builds fall back to `cpal`/`scrap` stubs (not the supported path)
 
 ---
 
@@ -41,6 +41,12 @@
 ```bash
 xcode-select --install
 ```
+
+Requires **macOS 14+** and a Swift toolchain (ships with Xcode / Command Line Tools).
+ScreenCaptureKit uses Swift interop, so the dynamic linker must see the Swift runtime
+(`DYLD_LIBRARY_PATH=/usr/lib/swift`). The `npm run tauri` script (and `dev.sh`) inject this
+automatically — always launch via `npm run tauri dev` / `npm run tauri build` (or `./dev.sh`),
+never a bare `tauri`, or the `screencapturekit` bindings fail to load.
 
 </details>
 
@@ -67,7 +73,7 @@ sudo apt install libwebkit2gtk-4.0-dev build-essential libssl-dev \
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/asmr-recorder.git
+git clone https://github.com/BusanSashimi/asmr-recorder.git
 cd asmr-recorder
 
 # Install frontend dependencies
@@ -105,6 +111,8 @@ npm run tauri build
 
 ## 🏗️ Tech Stack
 
+> 📐 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the live recording → capture → save data flow.
+
 <table>
 <tr>
 <td align="center" width="150">
@@ -132,11 +140,13 @@ npm run tauri build
 
 ### 📚 Key Libraries
 
-| Library                                                 | Purpose                      |
-| ------------------------------------------------------- | ---------------------------- |
-| [`cpal`](https://github.com/RustAudio/cpal)             | Cross-platform audio I/O     |
-| [`scrap`](https://github.com/nickkuk/scrap)             | Screen capture               |
-| [`ffmpeg-next`](https://github.com/zmwangx/rust-ffmpeg) | Media processing _(planned)_ |
+| Library                    | Where    | Purpose                                                      |
+| -------------------------- | -------- | ------------------------------------------------------------ |
+| `screencapturekit`         | Rust     | Native screen + system-audio capture (macOS 14+)             |
+| WebCodecs (`VideoEncoder`) | Frontend | In-browser H.264 encode of the composite canvas              |
+| `mediabunny`               | Frontend | Muxes the WebCodecs recording to MP4 + the lossless trim editor |
+| `tauri-plugin-updater`     | Rust     | In-app auto-update via GitHub releases                       |
+| `cpal` / `scrap`           | Rust     | Non-macOS fallback stubs only (cfg-gated; not the live path) |
 
 ---
 

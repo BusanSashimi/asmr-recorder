@@ -1,3 +1,8 @@
+> **HISTORICAL / OBSOLETE.** Describes the deleted native FFmpeg recording pipeline and cites a
+> file (`external_recorder.rs`) that no longer exists. The live path is frontend WebCodecs +
+> `mediabunny` + a raw-byte save IPC — see [/ARCHITECTURE.md](../../ARCHITECTURE.md). Kept for
+> history only.
+
 # Recording Implementation Status
 
 ## Overview
