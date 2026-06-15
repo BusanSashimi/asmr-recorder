@@ -6,7 +6,12 @@ import {
   useImperativeHandle,
 } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { Muxer, ArrayBufferTarget } from "mp4-muxer";
+import type {
+  Output,
+  BufferTarget,
+  EncodedVideoPacketSource,
+  EncodedAudioPacketSource,
+} from "mediabunny";
 import { hasMediaApi } from "@/lib/utils";
 import {
   startNativeSystemAudioStream,
@@ -146,11 +151,12 @@ function computeCoverCrop(
  * description.
  *
  * WKWebView/Safari's AudioEncoder emits `decoderConfig.description` as a full
- * MPEG-4 ES_Descriptor, but mp4-muxer wraps whatever it receives in its own
- * DecoderSpecificInfo (esds). Handing it the ES_Descriptor therefore produces a
- * doubly-nested esds whose top-level audioObjectType reads as 0 — no decoder
- * (ffmpeg, CoreAudio/QuickTime) can open the track. We descend the descriptor
- * tree to the DecoderSpecificInfo (tag 0x05) payload so the muxer wraps it once.
+ * MPEG-4 ES_Descriptor, but the muxer (mediabunny, like mp4-muxer before it)
+ * wraps whatever it receives in its own DecoderSpecificInfo (esds). Handing it
+ * the ES_Descriptor therefore produces a doubly-nested esds whose top-level
+ * audioObjectType reads as 0 — no decoder (ffmpeg, CoreAudio/QuickTime) can open
+ * the track. We descend the descriptor tree to the DecoderSpecificInfo (tag 0x05)
+ * payload so the muxer wraps it once.
  *
  * Chrome already provides the bare ASC (which starts with the audioObjectType
  * bits, not a descriptor tag), so we return null and leave its metadata as-is.
@@ -216,7 +222,7 @@ const extractAudioSpecificConfig = (
 /**
  * RecordingCanvas - Composites section sources using the active layout and records to MP4.
  *
- * Uses WebCodecs API + mp4-muxer for hardware-accelerated H.264 MP4 output.
+ * Uses WebCodecs API + mediabunny for hardware-accelerated H.264 MP4 output.
  * Falls back to MediaRecorder (WebM) if WebCodecs is unavailable.
  */
 export const RecordingCanvas = forwardRef<
@@ -272,7 +278,16 @@ export const RecordingCanvas = forwardRef<
 
   // WebCodecs refs (primary path - produces MP4)
   const videoEncoderRef = useRef<VideoEncoder | null>(null);
-  const muxerRef = useRef<Muxer<ArrayBufferTarget> | null>(null);
+  const muxerRef = useRef<{
+    output: Output;
+    target: BufferTarget;
+    videoSource: EncodedVideoPacketSource;
+    audioSource: EncodedAudioPacketSource | null;
+    videoTail: Promise<void>;
+    audioTail: Promise<void>;
+    firstVideo: boolean;
+    firstAudio: boolean;
+  } | null>(null);
   const useWebCodecsRef = useRef<boolean>(false);
   const muxedChunkCountRef = useRef<number>(0);
 
@@ -914,12 +929,12 @@ export const RecordingCanvas = forwardRef<
    * Returns true if initialization succeeded.
    */
   const initializeWebCodecs = useCallback(
-    (
+    async (
       width: number,
       height: number,
       fps: number,
       audioTrack?: MediaStreamTrack | null,
-    ): boolean => {
+    ): Promise<boolean> => {
       if (typeof VideoEncoder === "undefined") return false;
 
       // Declared outside the try so the outer catch (the WebM fallback, which a
@@ -928,10 +943,15 @@ export const RecordingCanvas = forwardRef<
       let audioEncoder: AudioEncoder | null = null;
 
       try {
+        // Lazily load mediabunny (already code-split via the trim editor) — it is
+        // the single MP4 muxer for both recording and trimming.
+        const mb = await import("mediabunny");
+
         // Resolve audio BEFORE building the muxer/encoder so the AudioContext's
         // actual sample rate (WebKit may clamp the requested 48k to the hardware
-        // rate) drives both the AAC encoder AND the muxer's mp4a/esds boxes,
-        // keeping the AudioData, encoder, and container coherent. Audio setup is
+        // rate) drives the AAC encoder; that rate then reaches the container via
+        // the encoder's decoderConfig metadata, keeping AudioData, encoder, and
+        // container coherent. Audio setup is
         // isolated in its own try: if it fails we record a video-only MP4 rather
         // than tearing the whole (verified) WebCodecs path down into a WebM
         // fallback.
@@ -950,19 +970,25 @@ export const RecordingCanvas = forwardRef<
               output: (chunk, metadata) => {
                 try {
                   // WKWebView/Safari hands a full ES_Descriptor as the
-                  // description; pass mp4-muxer the bare ASC so the esds isn't
+                  // description; pass the muxer the bare ASC so the esds isn't
                   // double-wrapped (which makes the audio track undecodable).
+                  // mediabunny wraps `description` in its own DecoderSpecificInfo
+                  // exactly like mp4-muxer did, so this fix is still required.
                   const dc = metadata?.decoderConfig;
                   const asc = dc?.description
                     ? extractAudioSpecificConfig(dc.description)
                     : null;
-                  if (dc && asc) {
-                    muxer.addAudioChunk(chunk, {
-                      ...metadata,
-                      decoderConfig: { ...dc, description: asc },
-                    });
-                  } else {
-                    muxer.addAudioChunk(chunk, metadata);
+                  const fixedMeta =
+                    dc && asc
+                      ? { ...metadata, decoderConfig: { ...dc, description: asc } }
+                      : metadata;
+                  if (holder.audioSource) {
+                    const pkt = mb.EncodedPacket.fromEncodedChunk(chunk);
+                    const meta = holder.firstAudio ? fixedMeta : undefined;
+                    holder.firstAudio = false;
+                    holder.audioTail = holder.audioTail.then(() =>
+                      holder.audioSource!.add(pkt, meta),
+                    );
                   }
                   // Track effective audio bitrate to verify CBR behavior in WKWebView.
                   if (audioLogWindowStartRef.current < 0) {
@@ -1033,26 +1059,42 @@ export const RecordingCanvas = forwardRef<
         }
         const hasAudio = audioEncoder !== null;
 
-        const target = new ArrayBufferTarget();
-
-        const muxer = new Muxer({
+        const target = new mb.BufferTarget();
+        const output = new mb.Output({
+          format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }),
           target,
-          video: { codec: "avc", width, height },
-          ...(hasAudio && {
-            audio: {
-              codec: "aac" as const,
-              numberOfChannels: AUDIO_NUM_CHANNELS,
-              sampleRate: audioSampleRate,
-            },
-          }),
-          fastStart: "in-memory",
-          firstTimestampBehavior: "offset",
         });
+        const videoSource = new mb.EncodedVideoPacketSource("avc");
+        output.addVideoTrack(videoSource);
+        const audioSource = hasAudio
+          ? new mb.EncodedAudioPacketSource("aac")
+          : null;
+        if (audioSource) output.addAudioTrack(audioSource);
+        // mediabunny's add()/finalize() are async; start() must precede any add().
+        // Width/height/channels/rate are derived from the first packet's
+        // decoderConfig metadata, so no track dimensions are configured here.
+        await output.start();
+
+        const holder = {
+          output,
+          target,
+          videoSource,
+          audioSource,
+          videoTail: Promise.resolve(),
+          audioTail: Promise.resolve(),
+          firstVideo: true,
+          firstAudio: true,
+        };
 
         const encoder = new VideoEncoder({
           output: (chunk, metadata) => {
             try {
-              muxer.addVideoChunk(chunk, metadata);
+              const pkt = mb.EncodedPacket.fromEncodedChunk(chunk);
+              const meta = holder.firstVideo ? metadata : undefined;
+              holder.firstVideo = false;
+              holder.videoTail = holder.videoTail.then(() =>
+                holder.videoSource.add(pkt, meta),
+              );
               muxedChunkCountRef.current++;
             } catch (error) {
               console.error("[WebCodecs] Failed to mux video chunk:", error);
@@ -1083,7 +1125,7 @@ export const RecordingCanvas = forwardRef<
         }
 
         videoEncoderRef.current = encoder;
-        muxerRef.current = muxer;
+        muxerRef.current = holder;
         useWebCodecsRef.current = true;
         muxedChunkCountRef.current = 0;
 
@@ -1315,7 +1357,7 @@ export const RecordingCanvas = forwardRef<
         }
 
         // Try WebCodecs first (MP4 output), fall back to MediaRecorder (WebM)
-        const webCodecsReady = initializeWebCodecs(
+        const webCodecsReady = await initializeWebCodecs(
           width,
           height,
           fps,
@@ -1439,8 +1481,11 @@ export const RecordingCanvas = forwardRef<
                 return;
               }
 
-              muxer.finalize();
-              const mp4Buffer = muxer.target.buffer;
+              // Drain the async add() chains so no packet is in flight when the
+              // file is sealed (mediabunny add()/finalize() are async).
+              await Promise.all([muxer.videoTail, muxer.audioTail]);
+              await muxer.output.finalize();
+              const mp4Buffer = muxer.target.buffer as ArrayBuffer;
               // Copy the bytes for the trim editor before saveRecording reads
               // them. Only this WebCodecs/MP4 path emits the edit event — the
               // MediaRecorder/WebM fallback doesn't — so the editor only ever
