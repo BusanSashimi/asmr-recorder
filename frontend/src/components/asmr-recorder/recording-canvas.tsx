@@ -933,10 +933,9 @@ export const RecordingCanvas = forwardRef<
               },
             });
 
-            // WebKit's AAC encoder defaults to VBR, which treats `bitrate` as a
-            // loose ceiling and encodes quiet ASMR content far below it (~80-130k
-            // observed vs the 256k requested). Request CBR so the configured rate
-            // is actually used; fall back to the default mode if CBR is rejected.
+            // Request CBR — packet-level analysis (35s clip, 2026-06-15) shows 256 kbps
+            // mean with 3.6% CoV, consistent with CBR being honored in WKWebView.
+            // Fall back to default (VBR) if the configure call throws.
             const baseAudioConfig: AudioEncoderConfig = {
               codec: AAC_CODEC,
               numberOfChannels: AUDIO_NUM_CHANNELS,
