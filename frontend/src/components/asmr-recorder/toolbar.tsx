@@ -43,6 +43,8 @@ import type { VideoQuality, OutputResolution, LayoutType, PipPosition } from "@/
 import { LAYOUT_LABELS } from "@/lib/layouts";
 import { gainToDb } from "@/lib/gain-to-db";
 import { StereoMeter } from "./audio-monitor-graphics";
+import { checkForUpdate, applyUpdate } from "@/lib/updater";
+import type { Update } from "@/lib/updater";
 
 interface AudioApp {
   bundleId: string;
@@ -53,6 +55,9 @@ interface AudioApp {
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
   // Tracks the most recent recording blob so "Re-edit" can reopen the TrimEditor
   // without requiring the user to locate the saved file on disk.
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
@@ -131,6 +136,43 @@ export function Toolbar() {
     window.dispatchEvent(
       new CustomEvent("recordingReadyForEdit", { detail: { blob: lastBlob } }),
     );
+  };
+
+  // Check for updates once on mount; surface a toast if one is found.
+  useEffect(() => {
+    checkForUpdate().then((update) => {
+      if (!update) return;
+      setPendingUpdate(update);
+      toast({
+        title: `Update available: v${update.version}`,
+        description: "An Update button will appear in the toolbar.",
+      });
+    });
+  }, []);
+
+  const handleApplyUpdate = async () => {
+    if (!pendingUpdate || isExternalRecording || status.isRecording) return;
+    setIsApplyingUpdate(true);
+    try {
+      await applyUpdate(pendingUpdate, setUpdateProgress);
+    } catch (err) {
+      toast({
+        title: "Update failed",
+        description: String(err),
+        variant: "destructive",
+      });
+      setIsApplyingUpdate(false);
+    }
+  };
+
+  const handleCheckUpdate = async () => {
+    const update = await checkForUpdate();
+    if (update) {
+      setPendingUpdate(update);
+      toast({ title: `Update available: v${update.version}` });
+    } else {
+      toast({ title: "Up to date", description: "No updates available." });
+    }
   };
 
   // Check if any section has content (for enabling record button)
@@ -571,6 +613,20 @@ export function Toolbar() {
               </div>
             </div>
 
+            <div className="flex items-center justify-between pt-2 border-t">
+              <button
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                onClick={handleCheckUpdate}
+              >
+                Check for updates
+              </button>
+              {pendingUpdate && (
+                <span className="text-xs text-amber-500">
+                  v{pendingUpdate.version} available
+                </span>
+              )}
+            </div>
+
             {!hasContent && (
               <p className="text-sm text-destructive">
                 Add at least one source to a section before recording
@@ -693,6 +749,26 @@ export function Toolbar() {
         <Download className="h-4 w-4" />
         Export
       </Button>
+
+      {/* Update available indicator */}
+      {pendingUpdate && !isApplyingUpdate && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-2 bg-transparent text-amber-500"
+          onClick={handleApplyUpdate}
+          disabled={status.isRecording || isExternalRecording}
+          title={`Update to v${pendingUpdate.version} — will relaunch`}
+        >
+          <Download className="h-4 w-4" />
+          Update
+        </Button>
+      )}
+      {isApplyingUpdate && (
+        <span className="text-sm text-muted-foreground font-mono">
+          {Math.round(updateProgress * 100)}%…
+        </span>
+      )}
 
       {/* Hidden file input for opening saved recordings */}
       <input

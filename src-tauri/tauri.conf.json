@@ -27,6 +27,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "category": "public.app-category.utilities",
     "icon": [
       "icons/32x32.png",
@@ -39,6 +40,14 @@
       "entitlements": "entitlements.plist",
       "frameworks": [],
       "minimumSystemVersion": "14.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRERjcxODNBNTZFNDdGQjgKUldTNGYrUldPaGozVFRsUy9Jd2hiQ3lqWWtYVDJ3dWtzQjBhSG40cCtaNE1WbU1mSUVxVHpnU3oK",
+      "endpoints": [
+        "https://github.com/BusanSashimi/asmr-recorder/releases/latest/download/latest.json"
+      ]
     }
   }
 }
