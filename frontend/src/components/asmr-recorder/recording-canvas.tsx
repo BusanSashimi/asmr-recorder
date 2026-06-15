@@ -101,6 +101,23 @@ const AUDIO_NUM_CHANNELS = 2;
 const AUDIO_BITRATE = 256_000;
 const AAC_CODEC = "mp4a.40.2";
 
+// Inline AudioWorklet input-recorder processor. Consumes the MediaStream source
+// and posts per-channel Float32Arrays to the main thread for encoding. Registered
+// via Blob URL to avoid bundler/CSP issues (same approach as native-system-audio.ts).
+const ENCODE_WORKLET_NAME = "encode-source";
+const ENCODE_WORKLET_CODE = `
+class EncodeSourceProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input.length && input[0].length) {
+      this.port.postMessage(input.map((ch) => ch.slice()));
+    }
+    return true;
+  }
+}
+registerProcessor('encode-source', EncodeSourceProcessor);
+`;
+
 // Returns a centered source crop rect so the source fills the dest without
 // distortion (analogous to CSS object-fit:cover). Returns null when source
 // dimensions are unknown (caller falls back to the stretch form).
@@ -752,60 +769,45 @@ export const RecordingCanvas = forwardRef<
   }, []);
 
   /**
-   * Capture raw audio samples from a MediaStreamTrack using Web Audio API
-   * (ScriptProcessorNode) and feed AudioData frames into the AudioEncoder.
-   *
-   * Uses ScriptProcessorNode instead of MediaStreamTrackProcessor for
-   * WebKit/WKWebView compatibility (Tauri on macOS).
+   * Capture raw audio samples from a MediaStreamTrack and feed AudioData frames
+   * into the AudioEncoder. Prefers an AudioWorkletNode (dedicated audio-render
+   * thread) and falls back to ScriptProcessorNode for WKWebView compatibility.
    */
   const startAudioProcessing = useCallback(
     (audioTrack: MediaStreamTrack, audioEncoder: AudioEncoder) => {
       try {
-        // Force stereo (AUDIO_NUM_CHANNELS): the ScriptProcessorNode below is
-        // created with this channel count so inputBuffer.numberOfChannels
-        // always matches the encoder/muxer config (mono mics are upmixed).
+        // Force stereo: encoder/muxer config uses AUDIO_NUM_CHANNELS.
         const channelCount = AUDIO_NUM_CHANNELS;
 
-        // Reuse the AudioContext established by initializeWebCodecs (or the
-        // multi-stream mixing context from acquireAudioTrack). Its actual sample
-        // rate is what the encoder + muxer were configured with, so we must NOT
-        // recreate it here — recreating could re-clamp to a different rate and
-        // desync the AudioData from the encoder (pitch-skew / undecodable track).
+        // Reuse the AudioContext established by initializeWebCodecs. Its actual
+        // sample rate drives both encoder and muxer — recreating it could clamp
+        // to a different rate and desync the AudioData (pitch-skew).
         const audioCtx = ensureAudioContext();
 
         const source = audioCtx.createMediaStreamSource(
           new MediaStream([audioTrack]),
         );
 
-        const bufferSize = 4096;
-        const scriptNode = audioCtx.createScriptProcessor(
-          bufferSize,
-          channelCount,
-          channelCount,
-        );
-
         let sampleOffset = 0;
 
-        scriptNode.onaudioprocess = (event) => {
+        // Shared encoder-feeding helper. `channels` is one Float32Array per
+        // channel (already copied — safe to read without aliasing concerns).
+        // Uses audioCtx.sampleRate so both paths reference the same clamped rate.
+        const emit = (channels: Float32Array[]) => {
           if (audioEncoder.state !== "configured") return;
-
-          const inputBuffer = event.inputBuffer;
-          const numChannels = inputBuffer.numberOfChannels;
-          const numFrames = inputBuffer.length;
-
+          const numFrames = channels[0]?.length ?? 0;
+          if (!numFrames) return;
+          const numChannels = channels.length;
           // Build planar Float32 data: [ch0_all_samples, ch1_all_samples, ...]
           const planarData = new Float32Array(numFrames * numChannels);
           for (let ch = 0; ch < numChannels; ch++) {
-            planarData.set(inputBuffer.getChannelData(ch), ch * numFrames);
+            planarData.set(channels[ch], ch * numFrames);
           }
-
-          const timestampUs =
-            (sampleOffset / inputBuffer.sampleRate) * 1_000_000;
-
+          const timestampUs = (sampleOffset / audioCtx.sampleRate) * 1_000_000;
           try {
             const audioData = new AudioData({
               format: "f32-planar",
-              sampleRate: inputBuffer.sampleRate,
+              sampleRate: audioCtx.sampleRate,
               numberOfFrames: numFrames,
               numberOfChannels: numChannels,
               timestamp: timestampUs,
@@ -816,29 +818,90 @@ export const RecordingCanvas = forwardRef<
           } catch (error) {
             console.error("[Audio] Failed to encode audio frame:", error);
           }
-
           sampleOffset += numFrames;
         };
 
-        // Connect: source -> scriptProcessor -> silent gain -> destination
-        // The node must be connected to destination for onaudioprocess to fire
-        const silentGain = audioCtx.createGain();
-        silentGain.gain.value = 0;
-
-        source.connect(scriptNode);
-        scriptNode.connect(silentGain);
-        silentGain.connect(audioCtx.destination);
-
-        audioProcessingCleanupRef.current = () => {
-          scriptNode.onaudioprocess = null;
-          source.disconnect();
-          scriptNode.disconnect();
-          silentGain.disconnect();
+        // ScriptProcessorNode fallback: established WKWebView-compatible primitive.
+        // The node must be connected through to audioCtx.destination for
+        // onaudioprocess to fire when the only other consumer is a
+        // MediaStreamDestinationNode.
+        const useScriptProcessor = () => {
+          const bufferSize = 4096;
+          const scriptNode = audioCtx.createScriptProcessor(
+            bufferSize,
+            channelCount,
+            channelCount,
+          );
+          scriptNode.onaudioprocess = (event) => {
+            const inputBuffer = event.inputBuffer;
+            const channels: Float32Array[] = [];
+            for (let ch = 0; ch < inputBuffer.numberOfChannels; ch++) {
+              channels.push(inputBuffer.getChannelData(ch));
+            }
+            emit(channels);
+          };
+          const silentGain = audioCtx.createGain();
+          silentGain.gain.value = 0;
+          source.connect(scriptNode);
+          scriptNode.connect(silentGain);
+          silentGain.connect(audioCtx.destination);
+          audioProcessingCleanupRef.current = () => {
+            scriptNode.onaudioprocess = null;
+            source.disconnect();
+            scriptNode.disconnect();
+            silentGain.disconnect();
+          };
+          console.log(
+            `[Audio] ScriptProcessorNode: ${channelCount}ch @ ${audioCtx.sampleRate}Hz, buffer=${bufferSize}`,
+          );
         };
 
-        console.log(
-          `[Audio] Started audio processing: ${channelCount}ch @ ${audioCtx.sampleRate}Hz, buffer=${bufferSize}`,
-        );
+        if (audioCtx.audioWorklet) {
+          // Fire-and-forget: addModule is async but initializeWebCodecs is sync.
+          // A few 128-frame quanta at record-start may be missed during module
+          // registration (~1ms) — inaudible.
+          void (async () => {
+            try {
+              const blob = new Blob([ENCODE_WORKLET_CODE], {
+                type: "application/javascript",
+              });
+              const url = URL.createObjectURL(blob);
+              await audioCtx.audioWorklet.addModule(url);
+              URL.revokeObjectURL(url);
+
+              const node = new AudioWorkletNode(audioCtx, ENCODE_WORKLET_NAME, {
+                numberOfInputs: 1,
+                numberOfOutputs: 1,
+                outputChannelCount: [channelCount],
+              });
+              node.port.onmessage = ({ data }) => emit(data as Float32Array[]);
+
+              const silentGain = audioCtx.createGain();
+              silentGain.gain.value = 0;
+              source.connect(node);
+              node.connect(silentGain);
+              silentGain.connect(audioCtx.destination);
+
+              audioProcessingCleanupRef.current = () => {
+                node.port.onmessage = null;
+                source.disconnect();
+                node.disconnect();
+                silentGain.disconnect();
+              };
+              console.log(
+                `[Audio] AudioWorklet: ${channelCount}ch @ ${audioCtx.sampleRate}Hz`,
+              );
+            } catch (e) {
+              console.warn(
+                "[Audio] AudioWorklet unavailable, falling back to ScriptProcessorNode:",
+                e,
+              );
+              useScriptProcessor();
+            }
+          })();
+        } else {
+          useScriptProcessor();
+        }
       } catch (error) {
         console.warn("[Audio] Failed to start audio processing:", error);
       }
