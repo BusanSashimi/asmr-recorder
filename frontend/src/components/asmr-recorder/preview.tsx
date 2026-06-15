@@ -2,8 +2,6 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
-  Play,
-  Pause,
   Volume2,
   VolumeX,
   Plus,
@@ -61,7 +59,6 @@ interface SectionSourceVideo {
 }
 
 export function Preview({ isRecording = false }: PreviewProps) {
-  const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [showRecordModal, setShowRecordModal] = useState(false);
   const [showCameraModal, setShowCameraModal] = useState(false);
@@ -181,26 +178,6 @@ export function Preview({ isRecording = false }: PreviewProps) {
   const hasContent = sectionState.sections.some(
     (section) => section.source !== null
   );
-
-  // Timeline playback listener
-  useEffect(() => {
-    const handleTimelinePlayback = (event: CustomEvent) => {
-      const { isPlaying: timelinePlaying } = event.detail;
-      setIsPlaying(timelinePlaying);
-    };
-
-    window.addEventListener(
-      "timelinePlayback",
-      handleTimelinePlayback as EventListener
-    );
-
-    return () => {
-      window.removeEventListener(
-        "timelinePlayback",
-        handleTimelinePlayback as EventListener
-      );
-    };
-  }, []);
 
   // Update video elements when streams change
   useEffect(() => {
@@ -602,17 +579,6 @@ export function Preview({ isRecording = false }: PreviewProps) {
     };
   }, []);
 
-  const togglePlay = () => {
-    const newPlayingState = !isPlaying;
-    setIsPlaying(newPlayingState);
-
-    window.dispatchEvent(
-      new CustomEvent("timelinePlayback", {
-        detail: { isPlaying: newPlayingState },
-      })
-    );
-  };
-
   const toggleMute = () => {
     setIsMuted(!isMuted);
     // Apply mute to all video elements
@@ -803,20 +769,6 @@ export function Preview({ isRecording = false }: PreviewProps) {
 
           {/* Controls overlay */}
           <div className="absolute bottom-4 left-4 right-4 flex items-center gap-3 z-10">
-            <Button
-              size="sm"
-              variant="secondary"
-              className="bg-black/50 hover:bg-black/70 text-white border-white/20"
-              onClick={togglePlay}
-              disabled={!hasContent || isRecording}
-            >
-              {isPlaying ? (
-                <Pause className="h-4 w-4" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
-            </Button>
-
             <div className="flex-1 h-1 bg-white/20 rounded-full">
               <div
                 className={`h-full bg-white rounded-full transition-all ${
