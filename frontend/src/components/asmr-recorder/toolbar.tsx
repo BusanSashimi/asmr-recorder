@@ -52,6 +52,10 @@ interface AudioApp {
   pid: number;
 }
 
+// Sentinel for the "entire system" Select option. Radix <SelectItem> rejects an
+// empty-string value, so the no-app-selected case uses this instead of "".
+const ALL_AUDIO_APPS = "__all__";
+
 export function Toolbar() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -88,7 +92,9 @@ export function Toolbar() {
     audioAppsLoadedRef.current = true;
     try {
       const apps = await invoke<AudioApp[]>("list_audio_apps");
-      setAudioApps(apps);
+      // Drop apps without a bundleId: they can't be targeted by SCK's bundle
+      // filter, and an empty value crashes the Radix <SelectItem> below.
+      setAudioApps(apps.filter((app) => app.bundleId !== ""));
     } catch {
       // SCK may not have permission yet; leave list empty (shows "Entire system" only)
     }
@@ -437,10 +443,11 @@ export function Toolbar() {
                 {externalConfig.captureSystemAudio && audioApps.length > 0 && (
                   <div className="space-y-1">
                     <Select
-                      value={externalConfig.systemAudioApp ?? ""}
+                      value={externalConfig.systemAudioApp ?? ALL_AUDIO_APPS}
                       onValueChange={(value) =>
                         updateExternalConfig({
-                          systemAudioApp: value === "" ? undefined : value,
+                          systemAudioApp:
+                            value === ALL_AUDIO_APPS ? undefined : value,
                         })
                       }
                     >
@@ -448,7 +455,9 @@ export function Toolbar() {
                         <SelectValue placeholder="Entire system (all apps)" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="">Entire system (all apps)</SelectItem>
+                        <SelectItem value={ALL_AUDIO_APPS}>
+                          Entire system (all apps)
+                        </SelectItem>
                         {audioApps.map((app) => (
                           <SelectItem key={app.bundleId} value={app.bundleId}>
                             {app.name}
