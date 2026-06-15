@@ -40,9 +40,10 @@ export function useSystemAudioMonitor(
 
     let cancelled = false;
     let ctx: AudioContext | null = null;
+    const ac = new AbortController();
 
     const teardown = () => {
-      stopNativeSystemAudioStream(MONITOR_SECTION);
+      void stopNativeSystemAudioStream(MONITOR_SECTION);
       ctx?.close().catch(() => {});
       ctx = null;
     };
@@ -67,6 +68,7 @@ export function useSystemAudioMonitor(
             channels: MONITOR_CHANNELS,
             appBundleId,
           },
+          ac.signal,
         );
 
         if (cancelled) return teardown();
@@ -110,6 +112,7 @@ export function useSystemAudioMonitor(
 
     return () => {
       cancelled = true;
+      ac.abort();
       setState(IDLE);
       teardown();
     };

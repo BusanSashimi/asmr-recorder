@@ -204,6 +204,7 @@ export async function startNativeSystemAudioStream(
   audioCtx: AudioContext,
   destination: AudioNode,
   opts: SystemAudioOptions,
+  signal?: AbortSignal,
 ): Promise<Channel<ArrayBuffer>> {
   const { sampleRate, channels, appBundleId } = opts;
 
@@ -259,11 +260,20 @@ export async function startNativeSystemAudioStream(
     onChunk: channel,
   });
 
+  // If a stop raced this start, its backend stop may have run before the stream
+  // was registered above (no-op), leaving the SCK session orphaned. Now that the
+  // backend insert has landed, issue the stop again so it actually tears down.
+  if (signal?.aborted) {
+    await stopNativeSystemAudioStream(sectionIndex);
+  }
+
   return channel;
 }
 
 /** Stop the native system-audio stream for a section and disconnect audio nodes. */
-export function stopNativeSystemAudioStream(sectionIndex: number): void {
+export async function stopNativeSystemAudioStream(
+  sectionIndex: number,
+): Promise<void> {
   const channel = streamChannels.get(sectionIndex);
   if (channel) {
     channel.onmessage = () => {};
@@ -274,5 +284,5 @@ export function stopNativeSystemAudioStream(sectionIndex: number): void {
     disconnect();
     cleanups.delete(sectionIndex);
   }
-  invoke("stop_system_audio_stream", { sectionIndex }).catch(() => {});
+  await invoke("stop_system_audio_stream", { sectionIndex }).catch(() => {});
 }

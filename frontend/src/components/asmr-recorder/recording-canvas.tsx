@@ -1294,7 +1294,23 @@ export const RecordingCanvas = forwardRef<
         );
 
         if (cancelled) {
+          // A stop that races this async audio-acquire window must release every
+          // resource acquireAudioTrack created, or the native ScreenCaptureKit
+          // session (and the AudioContext) leak until app exit. Mirror the normal
+          // recording-stop cleanup below.
           if (audioTrack) audioTrack.stop();
+          if (nativeSystemAudioCleanupRef.current) {
+            nativeSystemAudioCleanupRef.current();
+            nativeSystemAudioCleanupRef.current = null;
+          }
+          if (audioStreamRef.current) {
+            audioStreamRef.current.getTracks().forEach((t) => t.stop());
+            audioStreamRef.current = null;
+          }
+          if (audioContextRef.current) {
+            audioContextRef.current.close().catch(() => {});
+            audioContextRef.current = null;
+          }
           return;
         }
 
