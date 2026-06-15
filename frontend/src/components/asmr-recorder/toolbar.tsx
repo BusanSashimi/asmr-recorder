@@ -21,11 +21,7 @@ import {
 import {
   Mic,
   Download,
-  Play,
-  Pause,
   Square,
-  SkipBack,
-  SkipForward,
   Circle,
   Settings,
   Video,
@@ -36,7 +32,9 @@ import {
 } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { toast } from "@/hooks/use-toast";
+import { ToastAction } from "@/components/ui/toast";
 import { invoke } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
 import type { VideoQuality, OutputResolution, LayoutType, PipPosition } from "@/types/recording";
@@ -57,7 +55,6 @@ interface AudioApp {
 const ALL_AUDIO_APPS = "__all__";
 
 export function Toolbar() {
-  const [isPlaying, setIsPlaying] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateProgress, setUpdateProgress] = useState(0);
@@ -104,9 +101,18 @@ export function Toolbar() {
   const previousOutputPathRef = useRef(status.outputPath);
   useEffect(() => {
     if (status.outputPath && status.outputPath !== previousOutputPathRef.current) {
+      const savedPath = status.outputPath;
       toast({
         title: "Recording saved",
-        description: `Saved to: ${status.outputPath}`,
+        description: savedPath,
+        action: (
+          <ToastAction
+            altText="Reveal in Finder"
+            onClick={() => revealItemInDir(savedPath).catch(() => {})}
+          >
+            Reveal in Finder
+          </ToastAction>
+        ),
       });
     }
     previousOutputPathRef.current = status.outputPath;
@@ -210,45 +216,16 @@ export function Toolbar() {
     }
   };
 
-  const handlePlay = () => {
-    setIsPlaying(!isPlaying);
-    window.dispatchEvent(
-      new CustomEvent("timelinePlayback", {
-        detail: { isPlaying: !isPlaying },
-      })
-    );
-  };
-
-  const handleStop = async () => {
-    if (status.isRecording || isExternalRecording) {
-      try {
-        await stopExternalRecording();
-        toast({
-          title: "Recording stopped",
-          description: "Recording has been saved",
-        });
-      } catch (err) {
-        toast({
-          title: "Failed to stop recording",
-          description: String(err),
-          variant: "destructive",
-        });
-      }
-    }
-    setIsPlaying(false);
-    window.dispatchEvent(
-      new CustomEvent("timelinePlayback", {
-        detail: { isPlaying: false },
-      })
-    );
-  };
-
   const handleExport = () => {
-    if (status.outputPath) {
-      toast({
-        title: "Recording available",
-        description: `File: ${status.outputPath}`,
-      });
+    const path = status.outputPath;
+    if (path) {
+      revealItemInDir(path).catch(() =>
+        toast({
+          title: "Couldn't reveal file",
+          description: path,
+          variant: "destructive",
+        }),
+      );
     } else {
       toast({
         title: "No recording",
@@ -688,37 +665,6 @@ export function Toolbar() {
           </div>
         )}
       </div>
-
-      <Separator orientation="vertical" className="h-6" />
-
-      {/* Playback Controls */}
-      <Button variant="outline" size="sm" className="bg-transparent">
-        <SkipBack className="h-4 w-4" />
-      </Button>
-
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={handlePlay}
-        disabled={status.isRecording || isExternalRecording}
-        className="bg-transparent"
-      >
-        {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-      </Button>
-
-      <Button
-        variant="outline"
-        size="sm"
-        className="bg-transparent"
-        onClick={handleStop}
-        disabled={!isPlaying && !status.isRecording && !isExternalRecording}
-      >
-        <Square className="h-4 w-4" />
-      </Button>
-
-      <Button variant="outline" size="sm" className="bg-transparent">
-        <SkipForward className="h-4 w-4" />
-      </Button>
 
       <Separator orientation="vertical" className="h-6" />
 

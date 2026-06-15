@@ -1,350 +1,141 @@
-import { useState, useRef, useEffect } from "react"
-import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
-import {
-  Plus,
-  Volume2,
-  VolumeX,
-  Play,
-  Pause,
-  Trash2,
-  GripVertical,
-  ZoomIn,
-  ZoomOut,
-  Mic,
-  Monitor,
-} from "lucide-react"
-import { useRecordingContext } from "@/contexts/recording-context"
-import { StereoMeter, Spectrum } from "./audio-monitor-graphics"
+import { useState, useEffect } from "react";
+import { Button } from "@/components/ui/button";
+import { Film, Pencil } from "lucide-react";
+import { useRecordingContext } from "@/contexts/recording-context";
+import { StereoMeter, Spectrum } from "./audio-monitor-graphics";
 
-interface Track {
-  id: string
-  name: string
-  type: "audio" | "screen"
-  muted: boolean
-  clips: Array<{
-    id: string
-    name: string
-    start: number
-    duration: number
-  }>
+/** mm:ss from a seconds value. */
+function formatDuration(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+interface Clip {
+  name: string;
+  durationSec: number | null;
+  blob: Blob;
+}
+
+/**
+ * Read-only view of the current recording plus live input meters.
+ *
+ * This is intentionally NOT a multi-track editor: a recording is a single
+ * composited MP4, and real playback/scrubbing/trimming lives in the TrimEditor.
+ * The timeline shows the recorded clip (name + duration) and hands editing off
+ * to that editor; during setup/recording it shows the live audio meters.
+ */
 export function Timeline() {
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [zoomLevel, setZoomLevel] = useState(1)
-  const [playheadPosition, setPlayheadPosition] = useState(0)
-  const [tracks, setTracks] = useState<Track[]>([
-    {
-      id: "audio-1",
-      name: "Audio Track",
-      type: "audio",
-      muted: false,
-      clips: [],
-    },
-    {
-      id: "screen-1",
-      name: "Screen Recording",
-      type: "screen",
-      muted: false,
-      clips: [],
-    },
-  ])
+  const { audioMonitor } = useRecordingContext();
+  const [clip, setClip] = useState<Clip | null>(null);
 
-  const { audioMonitor } = useRecordingContext()
-
-  const minZoom = 0.25
-  const maxZoom = 4
-  const playbackIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const trackLabelsScrollRef = useRef<HTMLDivElement>(null)
-  const timelineGridScrollRef = useRef<HTMLDivElement>(null)
-
+  // Populate from the most recent finished/opened recording (same event the
+  // TrimEditor consumes). Read duration from a throwaway <video> (metadata only).
   useEffect(() => {
-    if (isPlaying) {
-      playbackIntervalRef.current = setInterval(() => {
-        setPlayheadPosition((prev) => prev + 1)
-      }, 100)
-    } else {
-      if (playbackIntervalRef.current) {
-        clearInterval(playbackIntervalRef.current)
-        playbackIntervalRef.current = null
-      }
-    }
+    const onReady = (event: Event) => {
+      const blob = (event as CustomEvent<{ blob?: Blob }>).detail?.blob;
+      if (!blob) return;
+      const name = blob instanceof File ? blob.name : "Recording";
 
-    return () => {
-      if (playbackIntervalRef.current) {
-        clearInterval(playbackIntervalRef.current)
-      }
-    }
-  }, [isPlaying])
+      const url = URL.createObjectURL(blob);
+      const probe = document.createElement("video");
+      probe.preload = "metadata";
+      const done = (durationSec: number | null) => {
+        setClip({ name, durationSec, blob });
+        URL.revokeObjectURL(url);
+      };
+      probe.onloadedmetadata = () =>
+        done(Number.isFinite(probe.duration) ? probe.duration : null);
+      probe.onerror = () => done(null);
+      probe.src = url;
+    };
 
-  useEffect(() => {
-    const handleTimelinePlay = (event: CustomEvent) => {
-      setIsPlaying(event.detail.isPlaying)
-    }
+    window.addEventListener("recordingReadyForEdit", onReady);
+    return () => window.removeEventListener("recordingReadyForEdit", onReady);
+  }, []);
 
-    window.addEventListener("timelinePlayback", handleTimelinePlay as EventListener)
-    return () => window.removeEventListener("timelinePlayback", handleTimelinePlay as EventListener)
-  }, [])
-
-  const handleZoomIn = () => {
-    setZoomLevel((prev) => Math.min(prev * 1.5, maxZoom))
-  }
-
-  const handleZoomOut = () => {
-    setZoomLevel((prev) => Math.max(prev / 1.5, minZoom))
-  }
-
-  const resetZoom = () => {
-    setZoomLevel(1)
-  }
-
-  const getScaledWidth = (width: number) => width * zoomLevel
-  const getScaledPosition = (position: number) => position * zoomLevel
-  const timelineWidth = getScaledWidth(1200)
-  const timeMarkerSpacing = getScaledWidth(60)
-
-  const handleScroll = (source: "labels" | "grid", scrollTop: number) => {
-    if (source === "labels" && timelineGridScrollRef.current) {
-      timelineGridScrollRef.current.scrollTop = scrollTop
-    } else if (source === "grid" && trackLabelsScrollRef.current) {
-      trackLabelsScrollRef.current.scrollTop = scrollTop
-    }
-  }
-
-  const handlePlay = () => {
-    const newPlayingState = !isPlaying
-    setIsPlaying(newPlayingState)
+  // Re-open the clip in the TrimEditor (the surface that does real playback/trim).
+  const openInEditor = () => {
+    if (!clip) return;
     window.dispatchEvent(
-      new CustomEvent("timelinePlayback", {
-        detail: { isPlaying: newPlayingState, playheadPosition },
-      })
-    )
-  }
-
-  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    setPlayheadPosition(clickX / zoomLevel)
-  }
-
-  const addTrack = (type: "audio" | "screen") => {
-    const newTrack: Track = {
-      id: Date.now().toString(),
-      name: `${type === "audio" ? "Audio" : "Screen"} ${tracks.filter((t) => t.type === type).length + 1}`,
-      type,
-      muted: false,
-      clips: [],
-    }
-    setTracks([...tracks, newTrack])
-  }
-
-  const deleteTrack = (trackId: string) => {
-    setTracks(tracks.filter((t) => t.id !== trackId))
-  }
-
-  const toggleTrackMute = (trackId: string) => {
-    setTracks(tracks.map((t) => (t.id === trackId ? { ...t, muted: !t.muted } : t)))
-  }
+      new CustomEvent("recordingReadyForEdit", { detail: { blob: clip.blob } }),
+    );
+  };
 
   return (
     <div className="h-full flex flex-col bg-card">
-      {/* Timeline Header */}
-      <div className="h-12 border-b border-border px-4 flex items-center gap-2">
-        <Button 
-          variant="outline" 
-          size="sm" 
-          className="gap-2 bg-transparent"
-          onClick={() => addTrack("audio")}
-        >
-          <Plus className="h-4 w-4" />
-          <Mic className="h-4 w-4" />
-        </Button>
-
-        <Button 
-          variant="outline" 
-          size="sm" 
-          className="gap-2 bg-transparent"
-          onClick={() => addTrack("screen")}
-        >
-          <Plus className="h-4 w-4" />
-          <Monitor className="h-4 w-4" />
-        </Button>
-
-        <Separator orientation="vertical" className="h-6" />
-
-        <Button variant="outline" size="sm" onClick={handlePlay} className="bg-transparent">
-          {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-        </Button>
-
+      {/* Header */}
+      <div className="h-12 border-b border-border px-4 flex items-center gap-3">
         <div className="text-sm font-medium">Timeline</div>
-
         <div className="flex-1" />
-
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleZoomOut}
-            disabled={zoomLevel <= minZoom}
-            className="bg-transparent"
-          >
-            <ZoomOut className="h-4 w-4" />
-          </Button>
-          <button
-            onClick={resetZoom}
-            className="text-sm text-muted-foreground w-12 text-center hover:text-foreground transition-colors cursor-pointer"
-          >
-            {Math.round(zoomLevel * 100)}%
-          </button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleZoomIn}
-            disabled={zoomLevel >= maxZoom}
-            className="bg-transparent"
-          >
-            <ZoomIn className="h-4 w-4" />
-          </Button>
-        </div>
+        {clip && (
+          <>
+            {clip.durationSec != null && (
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {formatDuration(clip.durationSec)}
+              </span>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2 bg-transparent"
+              onClick={openInEditor}
+            >
+              <Pencil className="h-4 w-4" />
+              Open in editor
+            </Button>
+          </>
+        )}
       </div>
 
-      {/* Timeline Content */}
-      <div className="flex-1 flex min-h-0">
-        {/* Track Labels */}
-        <div className="w-40 border-r border-border bg-muted/30 flex flex-col">
-          <div className="h-8 border-b border-border flex items-center px-3 flex-shrink-0">
-            <span className="text-sm font-medium">Tracks</span>
-          </div>
-
-          <div className="flex-1 overflow-hidden">
-            <ScrollArea
-              className="h-full"
-              onScrollCapture={(e) => {
-                const target = e.target as HTMLDivElement
-                handleScroll("labels", target.scrollTop)
-              }}
-            >
-              <div ref={trackLabelsScrollRef}>
-                {tracks.map((track) => (
-                  <div
-                    key={track.id}
-                    className="h-12 border-b border-border flex items-center px-2 gap-2 group hover:bg-muted/20"
-                  >
-                    <GripVertical className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity cursor-move" />
-
-                    <div className={`w-3 h-3 rounded ${track.type === "audio" ? "bg-green-500" : "bg-blue-500"}`} />
-
-                    <span className="text-sm flex-1 truncate">{track.name}</span>
-
-                    {track.type === "audio" && (
-                      <StereoMeter
-                        analyserL={audioMonitor.analyserL}
-                        analyserR={audioMonitor.analyserR}
-                        className="flex-shrink-0 rounded-sm"
-                      />
-                    )}
-
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="p-1 h-6 w-6"
-                        onClick={() => toggleTrackMute(track.id)}
-                      >
-                        {track.muted ? <VolumeX className="h-3 w-3" /> : <Volume2 className="h-3 w-3" />}
-                      </Button>
-
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="p-1 h-6 w-6 text-destructive hover:text-destructive"
-                        onClick={() => deleteTrack(track.id)}
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
+      {/* Content */}
+      <div className="flex-1 min-h-0 p-4 flex flex-col gap-4 overflow-auto">
+        {/* Live input meters (real — useful while monitoring/recording) */}
+        <div className="flex items-center gap-3">
+          <span className="w-20 flex-shrink-0 text-xs text-muted-foreground">
+            Live audio
+          </span>
+          <StereoMeter
+            analyserL={audioMonitor.analyserL}
+            analyserR={audioMonitor.analyserR}
+            className="flex-shrink-0 rounded-sm"
+          />
+          <div className="relative h-10 flex-1 overflow-hidden rounded border border-border bg-background">
+            <Spectrum
+              analyser={audioMonitor.analyserMix}
+              className="absolute inset-0 block h-full w-full opacity-90 pointer-events-none"
+            />
           </div>
         </div>
 
-        {/* Timeline Grid */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <div
-            className="h-8 border-b border-border bg-muted/20 relative flex-shrink-0 overflow-x-auto cursor-pointer"
-            onClick={handleTimelineClick}
+        {/* Recorded clip (read-only) — opens the editor on click */}
+        {clip ? (
+          <button
+            type="button"
+            onClick={openInEditor}
+            title="Open this recording in the trim editor"
+            className="group flex w-full items-center gap-3 rounded-md border border-blue-600 bg-blue-500/80 px-3 py-2 text-left transition-colors hover:bg-blue-500/90"
           >
-            {Array.from({ length: Math.ceil(20 * zoomLevel) }, (_, i) => (
-              <div
-                key={i}
-                className="absolute top-0 bottom-0 border-l border-border/50"
-                style={{ left: `${i * timeMarkerSpacing}px` }}
-              >
-                <span className="absolute top-1 left-1 text-xs text-muted-foreground">
-                  {Math.floor(i / (2 * zoomLevel))}:{String(Math.round((i % (2 * zoomLevel)) * (30 / zoomLevel))).padStart(2, "0")}
-                </span>
-              </div>
-            ))}
+            <Film className="h-5 w-5 flex-shrink-0 text-white" />
+            <span className="flex-1 truncate text-sm font-medium text-white">
+              {clip.name}
+            </span>
+            {clip.durationSec != null && (
+              <span className="text-xs tabular-nums text-white/90">
+                {formatDuration(clip.durationSec)}
+              </span>
+            )}
+            <span className="text-xs text-white/80 opacity-0 transition-opacity group-hover:opacity-100">
+              Open in editor →
+            </span>
+          </button>
+        ) : (
+          <div className="flex flex-1 items-center justify-center rounded-md border border-dashed border-border text-sm text-muted-foreground">
+            Record or open a clip to see it here.
           </div>
-
-          <div className="flex-1 overflow-hidden">
-            <ScrollArea
-              className="h-full"
-              onScrollCapture={(e) => {
-                const target = e.target as HTMLDivElement
-                handleScroll("grid", target.scrollTop)
-              }}
-            >
-              <div ref={timelineGridScrollRef} className="overflow-x-auto">
-                <div className="relative" style={{ minWidth: `${timelineWidth}px` }}>
-                  {tracks.map((track) => (
-                    <div
-                      key={track.id}
-                      className="h-12 border-b border-border relative bg-background"
-                    >
-                      {track.type === "audio" && (
-                        <Spectrum
-                          analyser={audioMonitor.analyserMix}
-                          className="absolute inset-0 block h-full w-full opacity-90 pointer-events-none"
-                        />
-                      )}
-
-                      {track.clips.map((clip) => (
-                        <div
-                          key={clip.id}
-                          className={`absolute top-1 bottom-1 rounded border flex items-center px-2 cursor-pointer transition-colors ${
-                            track.type === "audio"
-                              ? "bg-green-500/80 border-green-600 hover:bg-green-500/90"
-                              : "bg-blue-500/80 border-blue-600 hover:bg-blue-500/90"
-                          }`}
-                          style={{
-                            left: `${getScaledPosition(clip.start)}px`,
-                            width: `${getScaledWidth(clip.duration)}px`,
-                          }}
-                        >
-                          <span className="text-xs text-white font-medium truncate">{clip.name}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-
-                  {/* Playhead */}
-                  <div
-                    className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-10 pointer-events-none"
-                    style={{ left: `${getScaledPosition(playheadPosition)}px` }}
-                  >
-                    <div className="absolute -top-1 -left-1 w-2 h-2 bg-red-500 rounded-full" />
-                  </div>
-                </div>
-              </div>
-            </ScrollArea>
-          </div>
-        </div>
+        )}
       </div>
     </div>
-  )
+  );
 }
