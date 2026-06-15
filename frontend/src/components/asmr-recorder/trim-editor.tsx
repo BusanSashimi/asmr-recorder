@@ -14,7 +14,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
-import { type Segment, formatTime, splitSegment, keptDuration } from "./trim-segments";
+import {
+  type Segment,
+  formatTime,
+  splitSegment,
+  keptDuration,
+  rebaseTimestamp,
+  keepAudioPacket,
+} from "./trim-segments";
 
 /**
  * Re-encode frames [inSec, gopEnd) from a video track into a short segment and
@@ -135,7 +142,14 @@ async function trimToBuffer(
     const segOffset = timelineOffset;
     let lastVideoEnd = segOffset;
 
-    if (canFrameAccurate && startKey.timestamp < seg.in - 0.001) {
+    // A frame-accurate segment re-anchors video to seg.in (dropping the partial
+    // GOP's pre-roll); audio must use the SAME anchor or it leads the picture by up
+    // to one keyframe interval (~3s). The lossless branch anchors both to `origin`.
+    const frameAccurateSeg =
+      canFrameAccurate && startKey.timestamp < seg.in - 0.001;
+    const audioAnchor = frameAccurateSeg ? seg.in : origin;
+
+    if (frameAccurateSeg) {
       // Frame-accurate: re-encode the partial GOP [seg.in, gopEnd), then
       // packet-copy [gopEnd, seg.out]. Both halves use seg.in as the reference
       // so they join seamlessly at segOffset + (gopEnd - seg.in).
@@ -144,7 +158,7 @@ async function trimToBuffer(
 
       const reencoded = await reencodeLeadingGop(mb, videoTrack, seg.in, gopEnd);
       for (const rp of reencoded) {
-        const ts = rp.timestamp - seg.in + segOffset;
+        const ts = rebaseTimestamp(rp.timestamp, seg.in, segOffset);
         await videoSource.add(
           new mb.EncodedPacket(rp.data, rp.type, ts, rp.duration, rp.sequenceNumber),
           firstVideo ? videoMeta : undefined,
@@ -156,7 +170,7 @@ async function trimToBuffer(
       if (gopEndKey) {
         for await (const p of videoSink.packets(gopEndKey)) {
           if (p.timestamp > seg.out) break;
-          const ts = p.timestamp - seg.in + segOffset;
+          const ts = rebaseTimestamp(p.timestamp, seg.in, segOffset);
           await videoSource.add(
             new mb.EncodedPacket(p.data, p.type, ts, p.duration, p.sequenceNumber),
             firstVideo ? videoMeta : undefined,
@@ -169,7 +183,7 @@ async function trimToBuffer(
       // Lossless: packet-copy from the keyframe at/before seg.in.
       for await (const p of videoSink.packets(startKey)) {
         if (p.timestamp > seg.out) break;
-        const ts = p.timestamp - origin + segOffset;
+        const ts = rebaseTimestamp(p.timestamp, origin, segOffset);
         await videoSource.add(
           new mb.EncodedPacket(p.data, p.type, ts, p.duration, p.sequenceNumber),
           firstVideo ? videoMeta : undefined,
@@ -181,15 +195,24 @@ async function trimToBuffer(
 
     timelineOffset = lastVideoEnd; // next segment starts immediately after this one
 
-    // Audio: always lossless packet-copy. Same origin + segOffset as video.
+    // Audio: lossless packet-copy, anchored to match THIS segment's video base.
+    // In the frame-accurate branch, drop packets that end before seg.in so audio
+    // doesn't lead the re-anchored video. AAC packets can't be sub-trimmed, so the
+    // packet straddling seg.in is kept — audio aligns to within ~one packet (~21ms).
     if (audioSink && audioSource && audioStart && audioMeta) {
       for await (const p of audioSink.packets(audioStart)) {
         if (p.timestamp > seg.out) break;
+        if (
+          frameAccurateSeg &&
+          !keepAudioPacket(p.timestamp, p.duration ?? 0, seg.in)
+        ) {
+          continue;
+        }
         await audioSource.add(
           new mb.EncodedPacket(
             p.data,
             p.type,
-            p.timestamp - origin + segOffset,
+            rebaseTimestamp(p.timestamp, audioAnchor, segOffset),
             p.duration,
             p.sequenceNumber,
           ),

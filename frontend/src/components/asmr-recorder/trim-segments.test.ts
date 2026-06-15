@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { splitSegment, keptDuration, formatTime, MIN_SEG } from "./trim-segments";
+import {
+  splitSegment,
+  keptDuration,
+  formatTime,
+  MIN_SEG,
+  rebaseTimestamp,
+  keepAudioPacket,
+} from "./trim-segments";
 
 describe("splitSegment", () => {
   const seg = { in: 0, out: 10 };
@@ -91,5 +98,64 @@ describe("formatTime", () => {
 describe("MIN_SEG", () => {
   it("is 0.1 seconds", () => {
     expect(MIN_SEG).toBe(0.1);
+  });
+});
+
+describe("rebaseTimestamp", () => {
+  it("maps the anchor to segOffset (output origin of the segment)", () => {
+    expect(rebaseTimestamp(5, 5, 0)).toBe(0);
+    expect(rebaseTimestamp(5, 5, 12)).toBe(12);
+  });
+
+  it("preserves relative spacing from the anchor", () => {
+    // a packet 0.5s after the anchor lands 0.5s after segOffset
+    expect(rebaseTimestamp(5.5, 5, 12)).toBeCloseTo(12.5);
+  });
+
+  it("can produce a negative timestamp when src precedes the anchor", () => {
+    // the AAC packet straddling a frame-accurate in-point starts before it;
+    // mediabunny tolerates the negative start (normalizes to media-time 0).
+    expect(rebaseTimestamp(4.98, 5, 0)).toBeCloseTo(-0.02);
+  });
+
+  it("Bug A regression: frame-accurate audio (anchor=seg.in) aligns with video, not the keyframe", () => {
+    // Video re-anchors to seg.in; before the fix, audio used `origin` (the keyframe
+    // up to one ~3s GOP earlier), so audio was misaligned by (seg.in - origin).
+    const segIn = 8.0;
+    const segOffset = 0;
+    const videoFirstTs = rebaseTimestamp(segIn, segIn, segOffset); // re-encoded GOP starts at seg.in
+    const keyframeOrigin = 5.0; // 3s earlier — the OLD audio anchor
+    const audioStraddleStart = 7.99; // packet straddling seg.in
+    const fixedAudioTs = rebaseTimestamp(audioStraddleStart, segIn, segOffset);
+    // fixed: audio lands within one packet (~21ms) of the video cut frame
+    expect(Math.abs(fixedAudioTs - videoFirstTs)).toBeLessThan(0.025);
+    // for the SAME packet, the buggy origin-anchor placed it exactly (seg.in - origin)
+    // later — that offset IS the ~3s desync the fix removes.
+    const buggyAudioTs = rebaseTimestamp(audioStraddleStart, keyframeOrigin, segOffset);
+    expect(buggyAudioTs - fixedAudioTs).toBeCloseTo(segIn - keyframeOrigin); // ~3s
+  });
+});
+
+describe("keepAudioPacket", () => {
+  const segIn = 8.0;
+  const dur = 0.0213; // one AAC packet @ 48kHz (1024 samples)
+
+  it("drops a packet that ends entirely before seg.in", () => {
+    expect(keepAudioPacket(7.95, dur, segIn)).toBe(false); // ends at ~7.971 < 8.0
+  });
+
+  it("keeps the packet straddling seg.in (its end crosses the in-point)", () => {
+    expect(keepAudioPacket(7.99, dur, segIn)).toBe(true); // ends at ~8.011 > 8.0
+  });
+
+  it("keeps a packet that starts at or after seg.in", () => {
+    expect(keepAudioPacket(8.0, dur, segIn)).toBe(true);
+    expect(keepAudioPacket(8.5, dur, segIn)).toBe(true);
+  });
+
+  it("treats an unknown (0) duration as a point at pktStart", () => {
+    // with no duration, only packets strictly after seg.in survive
+    expect(keepAudioPacket(7.99, 0, segIn)).toBe(false);
+    expect(keepAudioPacket(8.01, 0, segIn)).toBe(true);
   });
 });

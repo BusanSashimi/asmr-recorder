@@ -33,3 +33,27 @@ export function splitSegment(
 export function keptDuration(segments: Segment[]): number {
   return segments.reduce((sum, s) => sum + Math.max(0, s.out - s.in), 0);
 }
+
+/** Rebase a source-clip packet timestamp onto the continuous output timeline. */
+export function rebaseTimestamp(
+  srcTs: number,
+  anchor: number,
+  segOffset: number,
+): number {
+  return srcTs - anchor + segOffset;
+}
+
+/**
+ * Should this audio packet be kept given a frame-accurate in-point?
+ *
+ * AAC packets are ~21 ms (1024 samples @ 48 kHz) and can't be sub-trimmed without
+ * re-encoding, so we keep the first packet whose END crosses `segIn` (accepting up
+ * to ~one packet of pre-roll) and drop packets that end entirely before `segIn`.
+ */
+export function keepAudioPacket(
+  pktStart: number,
+  pktDuration: number,
+  segIn: number,
+): boolean {
+  return pktStart + pktDuration > segIn;
+}
