@@ -248,7 +248,7 @@ function ThumbnailCanvas({
       ref={ref}
       onClick={onClick}
       title={`Seek to ${formatTime(wc.timestamp)}`}
-      className="h-9 flex-1 cursor-pointer rounded-sm object-cover opacity-80 hover:opacity-100 transition-opacity"
+      className="h-9 flex-1 min-w-0 cursor-pointer rounded-sm opacity-80 hover:opacity-100 transition-opacity"
     />
   );
 }
