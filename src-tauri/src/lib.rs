@@ -13,6 +13,7 @@ use system_audio_stream::SystemAudioStreamState;
 /// Frontend handles encoding and muxing, backend just saves the file
 #[tauri::command]
 fn save_media_recording(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    #[cfg(debug_assertions)]
     use std::path::PathBuf;
 
     // Video bytes arrive as the raw IPC request body (not base64), so large
