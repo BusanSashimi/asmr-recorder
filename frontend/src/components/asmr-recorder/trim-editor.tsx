@@ -509,7 +509,7 @@ export function TrimEditor() {
         if (!open && !isExporting) close();
       }}
     >
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl overflow-hidden">
         <DialogHeader>
           <DialogTitle>Trim recording</DialogTitle>
           <DialogDescription>
@@ -531,7 +531,7 @@ export function TrimEditor() {
           />
         )}
 
-        <div className="space-y-3">
+        <div className="space-y-3 min-w-0">
           {/* Slider with segment bands */}
           <SliderPrimitive.Root
             className="relative flex w-full touch-none select-none items-center"
