@@ -47,8 +47,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DYLD_LIBRARY_PATH: /usr/lib/swift
-          # Updater (minisign) signing — key was generated with --ci (no password)
+          # Updater (minisign) signing
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "ASMR Recorder ${{ github.ref_name }}"
