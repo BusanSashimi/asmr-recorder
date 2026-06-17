@@ -44,7 +44,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRERjcxODNBNTZFNDdGQjgKUldTNGYrUldPaGozVFRsUy9Jd2hiQ3lqWWtYVDJ3dWtzQjBhSG40cCtaNE1WbU1mSUVxVHpnU3oK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0MzMyNkRGQzU1QkM2MzUKUldRMXhsdkYzeVl6cFBDUTlHODQxV2htcjNRZjVITzMwUTc3WEx6ek9vWkpZbHNCQzVXNFF5QkcK",
       "endpoints": [
         "https://github.com/BusanSashimi/asmr-recorder/releases/latest/download/latest.json"
       ]
