@@ -18,6 +18,7 @@
 - 🎙️ **System + Mic Audio** — Microphone via `getUserMedia`; system / per-app audio captured natively through ScreenCaptureKit (macOS 14+)
 - 🖥️ **Native Screen & Region Capture** — Full-display or cropped-region capture via ScreenCaptureKit, streamed to the UI over a Tauri Channel
 - 🧩 **Multi-Section Composition** — Composite multiple screen/camera sources onto one canvas, encoded in-browser with WebCodecs (H.264)
+- 🔨 **Build-Triggered Soundbites** — Mix imported clips into recordings after successful Vite HMR/full-reload events without playing them through the speakers
 - ✂️ **Lossless Trim Editor** — Post-record trimming via `mediabunny` packet-copy (no re-encode)
 - 🍎 **macOS 14+ first** — ScreenCaptureKit-based; non-macOS builds fall back to `cpal`/`scrap` stubs (not the supported path)
 
@@ -98,6 +99,9 @@ This command will:
 1. 🌐 Start the Vite dev server for the frontend
 2. 🦀 Compile the Rust backend
 3. 🖼️ Launch the Tauri application window
+
+The companion Vite plugin and its port-5174 acceptance fixture live in
+[`packages/vite-plugin-asmr-recorder`](./packages/vite-plugin-asmr-recorder).
 
 ---
 

@@ -7,6 +7,7 @@ import {
   RecordingProvider,
   useRecordingContext,
 } from "@/contexts/recording-context";
+import { BuildSoundProvider } from "@/contexts/build-sound-context";
 
 function ASMRRecorderContent() {
   const { status } = useRecordingContext();
@@ -37,8 +38,10 @@ function ASMRRecorderContent() {
 
 export function ASMRRecorder() {
   return (
-    <RecordingProvider>
-      <ASMRRecorderContent />
-    </RecordingProvider>
+    <BuildSoundProvider>
+      <RecordingProvider>
+        <ASMRRecorderContent />
+      </RecordingProvider>
+    </BuildSoundProvider>
   );
 }

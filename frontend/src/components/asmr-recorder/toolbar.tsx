@@ -43,6 +43,8 @@ import { gainToDb } from "@/lib/gain-to-db";
 import { StereoMeter } from "./audio-monitor-graphics";
 import { checkForUpdate, applyUpdate } from "@/lib/updater";
 import type { Update } from "@/lib/updater";
+import { BuildSoundsDialog } from "./build-sounds-dialog";
+import { useBuildSounds } from "@/contexts/build-sound-context";
 
 interface AudioApp {
   bundleId: string;
@@ -66,6 +68,7 @@ export function Toolbar() {
   // Per-app system audio picker — loaded lazily when system audio is enabled
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const audioAppsLoadedRef = useRef(false);
+  const { settings: buildSoundSettings, playableSoundbites } = useBuildSounds();
 
   const {
     status,
@@ -191,6 +194,8 @@ export function Toolbar() {
   const hasContent = sectionState.sections.some(
     (section) => section.source !== null
   );
+  const canRecord =
+    hasContent || (buildSoundSettings.enabled && playableSoundbites.length > 0);
 
   const handleRecord = async () => {
     try {
@@ -613,14 +618,17 @@ export function Toolbar() {
               )}
             </div>
 
-            {!hasContent && (
+            {!canRecord && (
               <p className="text-sm text-destructive">
-                Add at least one source to a section before recording
+                Add a video source or enable Build Sounds with a playable clip
+                before recording
               </p>
             )}
           </div>
         </DialogContent>
       </Dialog>
+
+      <BuildSoundsDialog isRecording={status.isRecording || isExternalRecording} />
 
       {/* Main Record Button */}
       <Button
@@ -628,7 +636,7 @@ export function Toolbar() {
         size="sm"
         className="gap-2"
         onClick={handleRecord}
-        disabled={!hasContent}
+        disabled={!canRecord}
       >
         {status.isRecording || isExternalRecording ? (
           <>

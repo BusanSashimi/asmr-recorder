@@ -1,13 +1,16 @@
 use std::sync::Arc;
+use tauri::Manager;
 
 mod screen;
 mod system_audio;
 mod recording;
 mod screen_stream;
 mod system_audio_stream;
+mod build_sounds;
 
 use screen_stream::ScreenStreamState;
 use system_audio_stream::SystemAudioStreamState;
+use build_sounds::BuildSoundsState;
 
 /// Tauri command: Save media recording from frontend (WebM or MP4)
 /// Frontend handles encoding and muxing, backend just saves the file
@@ -76,13 +79,16 @@ pub fn run() {
     let screen_stream_state = Arc::new(ScreenStreamState::default());
     let system_audio_stream_state = Arc::new(SystemAudioStreamState::default());
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
+            let build_sounds = BuildSoundsState::load(app.handle())?;
+            build_sounds::start_bridge(app.handle().clone(), build_sounds.clone());
+            app.manage(build_sounds);
             Ok(())
         })
         .manage(screen_stream_state)
@@ -98,7 +104,21 @@ pub fn run() {
             system_audio_stream::start_system_audio_stream,
             system_audio_stream::stop_system_audio_stream,
             system_audio_stream::ack_system_audio_chunk,
+            build_sounds::get_build_sound_state,
+            build_sounds::update_build_sound_settings,
+            build_sounds::import_soundbite,
+            build_sounds::read_soundbite,
+            build_sounds::set_soundbite_availability,
+            build_sounds::delete_soundbite,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            app_handle
+                .state::<Arc<BuildSoundsState>>()
+                .clean_discovery();
+        }
+    });
 }
