@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import { Play, Pause, Scissors, Loader2, X } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
-import type { Input, EncodedPacketSink, EncodedPacket, WrappedCanvas, InputVideoTrack } from "mediabunny";
+import { isTauri } from "@tauri-apps/api/core";
+import type {
+  Input,
+  EncodedPacketSink,
+  EncodedPacket,
+  WrappedCanvas,
+  InputVideoTrack,
+  VideoCodec,
+} from "mediabunny";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +21,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
+import { createEditableMediaUrl } from "@/lib/editable-media";
+import { createFileBackedTarget } from "@/lib/recording-file";
+import type {
+  EditableMedia,
+  RecordingReadyForEditDetail,
+} from "@/types/editable-media";
 import {
   type Segment,
   formatTime,
@@ -44,7 +57,9 @@ async function reencodeLeadingGop(
     codec: videoTrack.codec as any,
     bitrate,
     keyFrameInterval: Math.max(gopEnd - inSec + 1, 9999),
-    onEncodedPacket: (p: EncodedPacket) => { packets.push(p); },
+    onEncodedPacket: (p: EncodedPacket) => {
+      packets.push(p);
+    },
   });
 
   const miniOutput = new mb.Output({
@@ -73,20 +88,26 @@ async function reencodeLeadingGop(
  * re-encoded so the cut starts at the exact requested frame. Otherwise the
  * in-point snaps to the preceding keyframe (same as the default lossless path).
  */
-async function trimToBuffer(
+async function trimMedia(
   input: Input,
   segments: Segment[],
   frameAccurate: boolean,
-): Promise<ArrayBuffer> {
+): Promise<EditableMedia> {
   const mb = await import("mediabunny");
   const videoTrack = await input.getPrimaryVideoTrack();
   if (!videoTrack?.codec) throw new Error("No supported video track found");
   const audioTrack = await input.getPrimaryAudioTrack();
   const audioCodec = audioTrack?.codec ?? null;
 
+  const fileTarget = isTauri()
+    ? await createFileBackedTarget(mb, "mp4", "trim")
+    : null;
+  const target = fileTarget?.target ?? new mb.BufferTarget();
   const output = new mb.Output({
-    format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }),
-    target: new mb.BufferTarget(),
+    format: new mb.Mp4OutputFormat({
+      fastStart: fileTarget ? false : "in-memory",
+    }),
+    target,
   });
   const videoSource = new mb.EncodedVideoPacketSource(videoTrack.codec);
   output.addVideoTrack(videoSource);
@@ -95,136 +116,179 @@ async function trimToBuffer(
     : null;
   if (audioSource) output.addAudioTrack(audioSource);
 
-  await output.start();
+  try {
+    await output.start();
 
-  const videoMeta = {
-    decoderConfig: (await videoTrack.getDecoderConfig()) ?? undefined,
-  };
-  const audioMeta = audioTrack
-    ? { decoderConfig: (await audioTrack.getDecoderConfig()) ?? undefined }
-    : null;
+    const videoMeta = {
+      decoderConfig: (await videoTrack.getDecoderConfig()) ?? undefined,
+    };
+    const audioMeta = audioTrack
+      ? { decoderConfig: (await audioTrack.getDecoderConfig()) ?? undefined }
+      : null;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const canFrameAccurate = frameAccurate && await mb.canEncodeVideo(videoTrack.codec as any);
-  if (frameAccurate && !canFrameAccurate) {
-    toast({
-      title: "Frame-accurate unavailable",
-      description: "H.264 encoder not found — using lossless keyframe-snapped cuts.",
-    });
-  }
-
-  let firstVideo = true;
-  let firstAudio = true;
-  let timelineOffset = 0; // output timestamp where the next segment begins
-
-  for (const seg of segments) {
-    if (seg.out - seg.in < 0.05) continue;
-
-    const videoSink = new mb.EncodedPacketSink(videoTrack);
-    const startKey = await videoSink.getKeyPacket(seg.in, { verifyKeyPackets: true });
-    if (!startKey) continue;
-
-    const audioSink = audioTrack ? new mb.EncodedPacketSink(audioTrack) : null;
-    let audioStart: EncodedPacket | null = null;
-    if (audioSink) {
-      audioStart = await audioSink.getPacket(startKey.timestamp);
+    const canFrameAccurate =
+      frameAccurate &&
+      (await mb.canEncodeVideo(videoTrack.codec as VideoCodec));
+    if (frameAccurate && !canFrameAccurate) {
+      toast({
+        title: "Frame-accurate unavailable",
+        description:
+          "H.264 encoder not found — using lossless keyframe-snapped cuts.",
+      });
     }
 
-    // origin: earliest clip timestamp emitted for this segment.
-    // Audio can start slightly before the video keyframe; use the minimum so
-    // neither stream gets a negative rebased timestamp.
-    const origin = Math.min(
-      startKey.timestamp,
-      audioStart?.timestamp ?? startKey.timestamp,
-    );
+    let firstVideo = true;
+    let firstAudio = true;
+    let timelineOffset = 0; // output timestamp where the next segment begins
 
-    // segOffset is fixed for this segment so audio and video use the same base.
-    const segOffset = timelineOffset;
-    let lastVideoEnd = segOffset;
+    for (const seg of segments) {
+      if (seg.out - seg.in < 0.05) continue;
 
-    // A frame-accurate segment re-anchors video to seg.in (dropping the partial
-    // GOP's pre-roll); audio must use the SAME anchor or it leads the picture by up
-    // to one keyframe interval (~3s). The lossless branch anchors both to `origin`.
-    const frameAccurateSeg =
-      canFrameAccurate && startKey.timestamp < seg.in - 0.001;
-    const audioAnchor = frameAccurateSeg ? seg.in : origin;
+      const videoSink = new mb.EncodedPacketSink(videoTrack);
+      const startKey = await videoSink.getKeyPacket(seg.in, {
+        verifyKeyPackets: true,
+      });
+      if (!startKey) continue;
 
-    if (frameAccurateSeg) {
-      // Frame-accurate: re-encode the partial GOP [seg.in, gopEnd), then
-      // packet-copy [gopEnd, seg.out]. Both halves use seg.in as the reference
-      // so they join seamlessly at segOffset + (gopEnd - seg.in).
-      const gopEndKey = await videoSink.getNextKeyPacket(startKey);
-      const gopEnd = gopEndKey ? gopEndKey.timestamp : seg.out;
-
-      const reencoded = await reencodeLeadingGop(mb, videoTrack, seg.in, gopEnd);
-      for (const rp of reencoded) {
-        const ts = rebaseTimestamp(rp.timestamp, seg.in, segOffset);
-        await videoSource.add(
-          new mb.EncodedPacket(rp.data, rp.type, ts, rp.duration, rp.sequenceNumber),
-          firstVideo ? videoMeta : undefined,
-        );
-        firstVideo = false;
-        lastVideoEnd = ts + rp.duration;
+      const audioSink = audioTrack
+        ? new mb.EncodedPacketSink(audioTrack)
+        : null;
+      let audioStart: EncodedPacket | null = null;
+      if (audioSink) {
+        audioStart = await audioSink.getPacket(startKey.timestamp);
       }
 
-      if (gopEndKey) {
-        for await (const p of videoSink.packets(gopEndKey)) {
-          if (p.timestamp > seg.out) break;
-          const ts = rebaseTimestamp(p.timestamp, seg.in, segOffset);
+      // origin: earliest clip timestamp emitted for this segment.
+      // Audio can start slightly before the video keyframe; use the minimum so
+      // neither stream gets a negative rebased timestamp.
+      const origin = Math.min(
+        startKey.timestamp,
+        audioStart?.timestamp ?? startKey.timestamp,
+      );
+
+      // segOffset is fixed for this segment so audio and video use the same base.
+      const segOffset = timelineOffset;
+      let lastVideoEnd = segOffset;
+
+      // A frame-accurate segment re-anchors video to seg.in (dropping the partial
+      // GOP's pre-roll); audio must use the SAME anchor or it leads the picture by up
+      // to one keyframe interval (~3s). The lossless branch anchors both to `origin`.
+      const frameAccurateSeg =
+        canFrameAccurate && startKey.timestamp < seg.in - 0.001;
+      const audioAnchor = frameAccurateSeg ? seg.in : origin;
+
+      if (frameAccurateSeg) {
+        // Frame-accurate: re-encode the partial GOP [seg.in, gopEnd), then
+        // packet-copy [gopEnd, seg.out]. Both halves use seg.in as the reference
+        // so they join seamlessly at segOffset + (gopEnd - seg.in).
+        const gopEndKey = await videoSink.getNextKeyPacket(startKey);
+        const gopEnd = gopEndKey ? gopEndKey.timestamp : seg.out;
+
+        const reencoded = await reencodeLeadingGop(
+          mb,
+          videoTrack,
+          seg.in,
+          gopEnd,
+        );
+        for (const rp of reencoded) {
+          const ts = rebaseTimestamp(rp.timestamp, seg.in, segOffset);
           await videoSource.add(
-            new mb.EncodedPacket(p.data, p.type, ts, p.duration, p.sequenceNumber),
+            new mb.EncodedPacket(
+              rp.data,
+              rp.type,
+              ts,
+              rp.duration,
+              rp.sequenceNumber,
+            ),
+            firstVideo ? videoMeta : undefined,
+          );
+          firstVideo = false;
+          lastVideoEnd = ts + rp.duration;
+        }
+
+        if (gopEndKey) {
+          for await (const p of videoSink.packets(gopEndKey)) {
+            if (p.timestamp > seg.out) break;
+            const ts = rebaseTimestamp(p.timestamp, seg.in, segOffset);
+            await videoSource.add(
+              new mb.EncodedPacket(
+                p.data,
+                p.type,
+                ts,
+                p.duration,
+                p.sequenceNumber,
+              ),
+              firstVideo ? videoMeta : undefined,
+            );
+            firstVideo = false;
+            lastVideoEnd = ts + p.duration;
+          }
+        }
+      } else {
+        // Lossless: packet-copy from the keyframe at/before seg.in.
+        for await (const p of videoSink.packets(startKey)) {
+          if (p.timestamp > seg.out) break;
+          const ts = rebaseTimestamp(p.timestamp, origin, segOffset);
+          await videoSource.add(
+            new mb.EncodedPacket(
+              p.data,
+              p.type,
+              ts,
+              p.duration,
+              p.sequenceNumber,
+            ),
             firstVideo ? videoMeta : undefined,
           );
           firstVideo = false;
           lastVideoEnd = ts + p.duration;
         }
       }
-    } else {
-      // Lossless: packet-copy from the keyframe at/before seg.in.
-      for await (const p of videoSink.packets(startKey)) {
-        if (p.timestamp > seg.out) break;
-        const ts = rebaseTimestamp(p.timestamp, origin, segOffset);
-        await videoSource.add(
-          new mb.EncodedPacket(p.data, p.type, ts, p.duration, p.sequenceNumber),
-          firstVideo ? videoMeta : undefined,
-        );
-        firstVideo = false;
-        lastVideoEnd = ts + p.duration;
-      }
-    }
 
-    timelineOffset = lastVideoEnd; // next segment starts immediately after this one
+      timelineOffset = lastVideoEnd; // next segment starts immediately after this one
 
-    // Audio: lossless packet-copy, anchored to match THIS segment's video base.
-    // In the frame-accurate branch, drop packets that end before seg.in so audio
-    // doesn't lead the re-anchored video. AAC packets can't be sub-trimmed, so the
-    // packet straddling seg.in is kept — audio aligns to within ~one packet (~21ms).
-    if (audioSink && audioSource && audioStart && audioMeta) {
-      for await (const p of audioSink.packets(audioStart)) {
-        if (p.timestamp > seg.out) break;
-        if (
-          frameAccurateSeg &&
-          !keepAudioPacket(p.timestamp, p.duration ?? 0, seg.in)
-        ) {
-          continue;
+      // Audio: lossless packet-copy, anchored to match THIS segment's video base.
+      // In the frame-accurate branch, drop packets that end before seg.in so audio
+      // doesn't lead the re-anchored video. AAC packets can't be sub-trimmed, so the
+      // packet straddling seg.in is kept — audio aligns to within ~one packet (~21ms).
+      if (audioSink && audioSource && audioStart && audioMeta) {
+        for await (const p of audioSink.packets(audioStart)) {
+          if (p.timestamp > seg.out) break;
+          if (
+            frameAccurateSeg &&
+            !keepAudioPacket(p.timestamp, p.duration ?? 0, seg.in)
+          ) {
+            continue;
+          }
+          await audioSource.add(
+            new mb.EncodedPacket(
+              p.data,
+              p.type,
+              rebaseTimestamp(p.timestamp, audioAnchor, segOffset),
+              p.duration,
+              p.sequenceNumber,
+            ),
+            firstAudio ? audioMeta : undefined,
+          );
+          firstAudio = false;
         }
-        await audioSource.add(
-          new mb.EncodedPacket(
-            p.data,
-            p.type,
-            rebaseTimestamp(p.timestamp, audioAnchor, segOffset),
-            p.duration,
-            p.sequenceNumber,
-          ),
-          firstAudio ? audioMeta : undefined,
-        );
-        firstAudio = false;
       }
     }
-  }
 
-  await output.finalize();
-  return output.target.buffer as ArrayBuffer;
+    await output.finalize();
+    if (fileTarget) {
+      return { kind: "file", artifact: await fileTarget.session.finalize() };
+    }
+    return {
+      kind: "blob",
+      blob: new Blob([(target as import("mediabunny").BufferTarget).buffer!], {
+        type: "video/mp4",
+      }),
+    };
+  } catch (error) {
+    await output.cancel().catch(() => {});
+    await fileTarget?.session.abort().catch(() => {});
+    throw error;
+  }
 }
 
 /** Renders a mediabunny WrappedCanvas thumbnail as a DOM canvas element. */
@@ -254,15 +318,16 @@ function ThumbnailCanvas({
 }
 
 /**
- * TrimEditor — opens right after a recording stops, operating on the in-memory
- * MP4 bytes dispatched by RecordingCanvas. Supports:
+ * TrimEditor — opens right after a recording stops, operating on a range-read
+ * recording file in Tauri or an in-memory Blob in the browser. Supports:
  *  - Head/tail trimming (lossless, in-point snapped to keyframe)
  *  - Mid-clip removal ("Cut out selection" splits a keep-segment into two)
  *  - Optional frame-accurate cuts (re-encodes the leading partial GOP)
  *  - Thumbnail filmstrip for quick navigation
  */
 export function TrimEditor() {
-  const [blob, setBlob] = useState<Blob | null>(null);
+  const [media, setMedia] = useState<EditableMedia | null>(null);
+  const [mediaRevision, setMediaRevision] = useState(0);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [duration, setDuration] = useState(0);
   const [segments, setSegments] = useState<Segment[]>([{ in: 0, out: 0 }]);
@@ -275,7 +340,7 @@ export function TrimEditor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const inputRef = useRef<Input | null>(null);
   const videoSinkRef = useRef<EncodedPacketSink | null>(null);
-  const urlRef = useRef<string | null>(null);
+  const urlCleanupRef = useRef<(() => void) | null>(null);
   const prevValRef = useRef<[number, number]>([0, 0]);
   const outTouchedRef = useRef(false);
 
@@ -287,11 +352,13 @@ export function TrimEditor() {
 
   useEffect(() => {
     const onReady = (event: Event) => {
-      const detail = (event as CustomEvent<{ blob: Blob }>).detail;
-      if (!detail?.blob) return;
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-      const url = URL.createObjectURL(detail.blob);
-      urlRef.current = url;
+      const detail = (event as CustomEvent<RecordingReadyForEditDetail>).detail;
+      if (!detail?.media) return;
+      inputRef.current?.dispose();
+      inputRef.current = null;
+      urlCleanupRef.current?.();
+      const { url, revoke } = createEditableMediaUrl(detail.media);
+      urlCleanupRef.current = revoke;
       setSegments([{ in: 0, out: 0 }]);
       setActiveSegIdx(0);
       setIsPlaying(false);
@@ -299,22 +366,24 @@ export function TrimEditor() {
       outTouchedRef.current = false;
       prevValRef.current = [0, 0];
       setVideoUrl(url);
-      setBlob(detail.blob);
+      setMedia(detail.media);
+      setMediaRevision((revision) => revision + 1);
     };
     window.addEventListener("recordingReadyForEdit", onReady);
     return () => {
       window.removeEventListener("recordingReadyForEdit", onReady);
-      if (urlRef.current) {
-        URL.revokeObjectURL(urlRef.current);
-        urlRef.current = null;
-      }
+      inputRef.current?.dispose();
+      inputRef.current = null;
+      urlCleanupRef.current?.();
+      urlCleanupRef.current = null;
     };
   }, []);
 
-  // Build Mediabunny Input + fetch thumbnails once per blob.
+  // Build Mediabunny Input + fetch thumbnails once per recording.
   useEffect(() => {
-    if (!blob) return;
+    if (!media || !videoUrl) return;
     let cancelled = false;
+    let activeInput: Input | null = null;
 
     (async () => {
       const mb = await import("mediabunny");
@@ -322,8 +391,15 @@ export function TrimEditor() {
 
       const input = new mb.Input({
         formats: mb.ALL_FORMATS,
-        source: new mb.BlobSource(blob),
+        source:
+          media.kind === "file"
+            ? new mb.UrlSource(videoUrl, {
+                maxCacheSize: 8 * 1024 * 1024,
+                parallelism: 2,
+              })
+            : new mb.BlobSource(media.blob),
       });
+      activeInput = input;
       inputRef.current = input;
 
       const track = await input.getPrimaryVideoTrack();
@@ -356,17 +432,18 @@ export function TrimEditor() {
 
     return () => {
       cancelled = true;
-      inputRef.current = null;
+      activeInput?.dispose();
+      if (inputRef.current === activeInput) inputRef.current = null;
       videoSinkRef.current = null;
     };
-  }, [blob]);
+  }, [media, videoUrl, mediaRevision]);
 
   const close = useCallback(() => {
-    if (urlRef.current) {
-      URL.revokeObjectURL(urlRef.current);
-      urlRef.current = null;
-    }
-    setBlob(null);
+    inputRef.current?.dispose();
+    inputRef.current = null;
+    urlCleanupRef.current?.();
+    urlCleanupRef.current = null;
+    setMedia(null);
     setVideoUrl(null);
     setDuration(0);
     setSegments([{ in: 0, out: 0 }]);
@@ -475,22 +552,31 @@ export function TrimEditor() {
     prevValRef.current = [first.in, first.out];
   }, [segments, activeSegIdx, inPoint, outPoint]);
 
-  const handleRemoveSegment = useCallback(
-    (i: number) => {
-      setSegments((prev) => prev.filter((_, idx) => idx !== i));
-      setActiveSegIdx((prev) => Math.max(0, prev > i ? prev - 1 : prev));
-    },
-    [],
-  );
+  const handleRemoveSegment = useCallback((i: number) => {
+    setSegments((prev) => prev.filter((_, idx) => idx !== i));
+    setActiveSegIdx((prev) => Math.max(0, prev > i ? prev - 1 : prev));
+  }, []);
 
   const handleExport = useCallback(async () => {
     const input = inputRef.current;
     if (!input) return;
     setIsExporting(true);
     try {
-      const buffer = await trimToBuffer(input, segments, frameAccurate);
-      const savedPath = await invoke<string>("save_media_recording", buffer);
-      toast({ title: "Trimmed clip saved", description: savedPath });
+      const result = await trimMedia(input, segments, frameAccurate);
+      if (result.kind === "file") {
+        toast({
+          title: "Trimmed clip saved",
+          description: result.artifact.path,
+        });
+      } else {
+        const url = URL.createObjectURL(result.blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "recording_trimmed.mp4";
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        toast({ title: "Trimmed clip exported" });
+      }
       close();
     } catch (error) {
       toast({
@@ -504,7 +590,7 @@ export function TrimEditor() {
 
   return (
     <Dialog
-      open={!!blob}
+      open={!!media}
       onOpenChange={(open) => {
         if (!open && !isExporting) close();
       }}
@@ -513,8 +599,9 @@ export function TrimEditor() {
         <DialogHeader>
           <DialogTitle>Trim recording</DialogTitle>
           <DialogDescription>
-            Drag the handles to adjust the active segment. Use &quot;Cut&quot; to
-            remove the selected range. The start snaps to the nearest keyframe.
+            Drag the handles to adjust the active segment. Use &quot;Cut&quot;
+            to remove the selected range. The start snaps to the nearest
+            keyframe.
           </DialogDescription>
         </DialogHeader>
 
@@ -585,7 +672,8 @@ export function TrimEditor() {
                   key={i}
                   wc={wc}
                   onClick={() => {
-                    if (videoRef.current) videoRef.current.currentTime = wc.timestamp;
+                    if (videoRef.current)
+                      videoRef.current.currentTime = wc.timestamp;
                   }}
                 />
               ))}
@@ -649,7 +737,9 @@ export function TrimEditor() {
             <Button
               variant="outline"
               onClick={handleCutSelection}
-              disabled={isExporting || duration === 0 || outPoint - inPoint < 0.1}
+              disabled={
+                isExporting || duration === 0 || outPoint - inPoint < 0.1
+              }
               title="Remove the selected range from the clip"
             >
               <Scissors className="h-4 w-4" />
@@ -667,11 +757,7 @@ export function TrimEditor() {
               Frame-accurate
             </label>
             <div className="flex gap-2">
-              <Button
-                variant="ghost"
-                onClick={close}
-                disabled={isExporting}
-              >
+              <Button variant="ghost" onClick={close} disabled={isExporting}>
                 Skip
               </Button>
               <Button

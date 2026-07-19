@@ -45,6 +45,11 @@ import { checkForUpdate, applyUpdate } from "@/lib/updater";
 import type { Update } from "@/lib/updater";
 import { BuildSoundsDialog } from "./build-sounds-dialog";
 import { useBuildSounds } from "@/contexts/build-sound-context";
+import {
+  dispatchRecordingReadyForEdit,
+  type EditableMedia,
+  type RecordingReadyForEditDetail,
+} from "@/types/editable-media";
 
 interface AudioApp {
   bundleId: string;
@@ -61,9 +66,9 @@ export function Toolbar() {
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateProgress, setUpdateProgress] = useState(0);
   const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
-  // Tracks the most recent recording blob so "Re-edit" can reopen the TrimEditor
-  // without requiring the user to locate the saved file on disk.
-  const [lastBlob, setLastBlob] = useState<Blob | null>(null);
+  // Tracks the most recent recording source so "Re-edit" can reopen the
+  // TrimEditor without loading a desktop recording into browser memory.
+  const [lastMedia, setLastMedia] = useState<EditableMedia | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Per-app system audio picker — loaded lazily when system audio is enabled
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
@@ -121,36 +126,29 @@ export function Toolbar() {
     previousOutputPathRef.current = status.outputPath;
   }, [status.outputPath]);
 
-  // Capture the blob from each completed recording so "Re-edit" can reopen it.
+  // Capture each completed recording so "Re-edit" can reopen it.
   useEffect(() => {
     const onReady = (e: Event) => {
-      setLastBlob((e as CustomEvent<{ blob: Blob }>).detail.blob);
+      setLastMedia(
+        (e as CustomEvent<RecordingReadyForEditDetail>).detail.media,
+      );
     };
     window.addEventListener("recordingReadyForEdit", onReady);
     return () => window.removeEventListener("recordingReadyForEdit", onReady);
   }, []);
-
-  // Clear the stale blob when a new recording starts.
-  useEffect(() => {
-    if (isExternalRecording) setLastBlob(null);
-  }, [isExternalRecording]);
 
   const handleOpenFile = () => fileInputRef.current?.click();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    window.dispatchEvent(
-      new CustomEvent("recordingReadyForEdit", { detail: { blob: file } }),
-    );
+    dispatchRecordingReadyForEdit({ kind: "blob", blob: file });
     e.target.value = "";
   };
 
   const handleReEdit = () => {
-    if (!lastBlob) return;
-    window.dispatchEvent(
-      new CustomEvent("recordingReadyForEdit", { detail: { blob: lastBlob } }),
-    );
+    if (!lastMedia) return;
+    dispatchRecordingReadyForEdit(lastMedia);
   };
 
   // Check for updates once on mount; surface a toast if one is found.
@@ -206,6 +204,7 @@ export function Toolbar() {
           description: "Saving recording...",
         });
       } else {
+        setLastMedia(null);
         await startExternalRecording();
         toast({
           title: "Recording started",
@@ -689,7 +688,7 @@ export function Toolbar() {
       </Button>
 
       {/* Re-edit last recording (shown after a recording completes) */}
-      {lastBlob && !isExternalRecording && (
+      {lastMedia && !isExternalRecording && (
         <Button
           variant="outline"
           size="sm"

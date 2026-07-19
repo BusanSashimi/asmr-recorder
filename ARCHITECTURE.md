@@ -18,12 +18,14 @@ Rust recording pipeline was deleted — see
    `Mp4OutputFormat` + `EncodedVideo/AudioPacketSource`). mediabunny is the project's single
    muxer for both recording and trimming — the previously-used `mp4-muxer` was migrated off and
    removed (see [ai-dev/doc/mp4-muxer-to-mediabunny-migration.md](ai-dev/doc/mp4-muxer-to-mediabunny-migration.md)).
-4. **Save** — the finished MP4 `ArrayBuffer` is sent to Rust's `save_media_recording` over a
-   **raw-byte** Tauri IPC (`src-tauri/src/lib.rs:15-20`, `InvokeBody::Raw`) and written to disk.
-   No base64, so there is no string-length size cap on long recordings.
+4. **Save** — in Tauri, mediabunny writes seekable 8 MiB `StreamTarget` chunks into a Rust-owned
+   recording session. Rust writes each raw IPC chunk at its requested offset and atomically
+   renames the partial file when the muxer finalizes. The finished MP4 is never materialized as
+   one frontend `ArrayBuffer`; browser-only use retains an in-memory `BufferTarget` fallback.
 
-If WebCodecs is unavailable the canvas falls back to `MediaRecorder` (WebM); the same raw-byte
-save command handles both.
+If WebCodecs is unavailable the canvas falls back to `MediaRecorder` (WebM). Desktop WebM blobs
+are appended to the same file-session API as each one-second chunk arrives, with bounded pending
+bytes; browser-only use retains the in-memory Blob fallback.
 
 ### The WKWebView AAC quirk
 
@@ -45,7 +47,8 @@ the frontend over Tauri `Channel`s.
 | `system_audio_stream.rs`  | SCK system / per-app audio → interleaved PCM over a `Channel` |
 | `screen.rs` / `system_audio.rs` | Capture config + cfg-gated platform selection (macOS → `screencapturekit`; non-macOS → `cpal`/`scrap` fallback stubs) |
 | `recording.rs`            | Device / running-app enumeration (`list_audio_apps`) |
-| `lib.rs`                  | Plugin + command wiring and the `save_media_recording` save command |
+| `recording_files.rs`      | Bounded seekable recording sessions, validation, finalization, and cleanup |
+| `lib.rs`                  | Plugin, state, and command wiring |
 | `main.rs`                 | 4-line shim → `asmr_recorder_lib::run()` |
 
 ScreenCaptureKit uses Swift interop, so the binary must be launched with
@@ -56,7 +59,8 @@ ScreenCaptureKit uses Swift interop, so the binary must be launched with
 `frontend/src/components/asmr-recorder/trim-editor.tsx` does a **lossless transmux** with
 `mediabunny` (dynamic import): it packet-copies encoded video/audio, snapping the cut-in to the
 preceding keyframe, with an opt-in frame-accurate mode that re-encodes only the leading partial
-GOP. Export reuses the same raw-byte `save_media_recording` IPC. See
+GOP. Desktop inputs use the Tauri asset protocol plus HTTP range reads, and desktop exports stream
+through a new recording-file session; neither operation buffers the whole recording. See
 [ai-dev/doc/trim-editor-v2-multisegment.md](ai-dev/doc/trim-editor-v2-multisegment.md).
 
 ## Distribution

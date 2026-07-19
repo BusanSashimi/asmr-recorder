@@ -95,6 +95,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
     setActiveSectionIndex,
     externalConfig,
     isExternalRecording,
+    stopExternalRecording,
     setRecordingAnalysers,
   } = useRecordingContext();
 
@@ -173,6 +174,14 @@ export function Preview({ isRecording = false }: PreviewProps) {
       variant: "destructive",
     });
   }, []);
+
+  const handleFatalRecordingError = useCallback(
+    (error: string) => {
+      handleFrameError(error);
+      void stopExternalRecording();
+    },
+    [handleFrameError, stopExternalRecording],
+  );
 
   // Check if any section has content
   const hasContent = sectionState.sections.some(
@@ -863,6 +872,7 @@ export function Preview({ isRecording = false }: PreviewProps) {
         frameRate={externalConfig.frameRate || 30}
         isRecording={isExternalRecording}
         onFrameError={handleFrameError}
+        onFatalError={handleFatalRecordingError}
         sectionSources={sectionSources}
         getSectionSources={getSectionSources}
         captureMic={externalConfig.captureMic}

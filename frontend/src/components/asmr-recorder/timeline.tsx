@@ -3,6 +3,15 @@ import { Button } from "@/components/ui/button";
 import { Film, Pencil } from "lucide-react";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { StereoMeter, Spectrum } from "./audio-monitor-graphics";
+import {
+  createEditableMediaUrl,
+  editableMediaName,
+} from "@/lib/editable-media";
+import {
+  dispatchRecordingReadyForEdit,
+  type EditableMedia,
+  type RecordingReadyForEditDetail,
+} from "@/types/editable-media";
 
 /** mm:ss from a seconds value. */
 function formatDuration(sec: number): string {
@@ -15,7 +24,7 @@ function formatDuration(sec: number): string {
 interface Clip {
   name: string;
   durationSec: number | null;
-  blob: Blob;
+  media: EditableMedia;
 }
 
 /**
@@ -33,17 +42,22 @@ export function Timeline() {
   // Populate from the most recent finished/opened recording (same event the
   // TrimEditor consumes). Read duration from a throwaway <video> (metadata only).
   useEffect(() => {
+    let requestId = 0;
     const onReady = (event: Event) => {
-      const blob = (event as CustomEvent<{ blob?: Blob }>).detail?.blob;
-      if (!blob) return;
-      const name = blob instanceof File ? blob.name : "Recording";
+      const media = (event as CustomEvent<RecordingReadyForEditDetail>).detail
+        ?.media;
+      if (!media) return;
+      const name = editableMediaName(media);
+      const currentRequest = ++requestId;
 
-      const url = URL.createObjectURL(blob);
+      const { url, revoke } = createEditableMediaUrl(media);
       const probe = document.createElement("video");
       probe.preload = "metadata";
       const done = (durationSec: number | null) => {
-        setClip({ name, durationSec, blob });
-        URL.revokeObjectURL(url);
+        if (currentRequest === requestId) {
+          setClip({ name, durationSec, media });
+        }
+        revoke();
       };
       probe.onloadedmetadata = () =>
         done(Number.isFinite(probe.duration) ? probe.duration : null);
@@ -52,15 +66,16 @@ export function Timeline() {
     };
 
     window.addEventListener("recordingReadyForEdit", onReady);
-    return () => window.removeEventListener("recordingReadyForEdit", onReady);
+    return () => {
+      requestId++;
+      window.removeEventListener("recordingReadyForEdit", onReady);
+    };
   }, []);
 
   // Re-open the clip in the TrimEditor (the surface that does real playback/trim).
   const openInEditor = () => {
     if (!clip) return;
-    window.dispatchEvent(
-      new CustomEvent("recordingReadyForEdit", { detail: { blob: clip.blob } }),
-    );
+    dispatchRecordingReadyForEdit(clip.media);
   };
 
   return (

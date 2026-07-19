@@ -5,10 +5,11 @@ import {
   forwardRef,
   useImperativeHandle,
 } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import type {
   Output,
   BufferTarget,
+  StreamTarget,
   EncodedVideoPacketSource,
   EncodedAudioPacketSource,
 } from "mediabunny";
@@ -25,6 +26,12 @@ import { BuildSoundSelector } from "@/lib/build-sound-selection";
 import { useBuildSounds } from "@/contexts/build-sound-context";
 import type { DecodedSoundbite } from "@/types/build-sounds";
 import { captureRecordingStream } from "@/lib/recording-stream";
+import {
+  createFileBackedTarget,
+  MEDIA_RECORDER_PENDING_BYTES_LIMIT,
+  RecordingFileSession,
+} from "@/lib/recording-file";
+import { dispatchRecordingReadyForEdit } from "@/types/editable-media";
 
 interface SectionSource {
   type: "video" | "canvas" | null;
@@ -43,6 +50,8 @@ interface RecordingCanvasProps {
   isRecording: boolean;
   /** Callback when a frame fails to send */
   onFrameError?: (error: string) => void;
+  /** Callback for failures that require the active recording to stop */
+  onFatalError?: (error: string) => void;
   /** Section sources (video or canvas elements for each section) */
   sectionSources: [SectionSource, SectionSource, SectionSource, SectionSource];
   /** Optional getter function to get fresh sources on each frame (preferred) */
@@ -239,6 +248,7 @@ export const RecordingCanvas = forwardRef<
     frameRate,
     isRecording,
     onFrameError,
+    onFatalError,
     sectionSources,
     getSectionSources,
     captureMic,
@@ -284,25 +294,29 @@ export const RecordingCanvas = forwardRef<
   const recordingHeightRef = useRef(recordingHeight);
   const frameRateRef = useRef(frameRate);
   const onFrameErrorRef = useRef(onFrameError);
+  const onFatalErrorRef = useRef(onFatalError);
 
   // WebCodecs refs (primary path - produces MP4)
   const videoEncoderRef = useRef<VideoEncoder | null>(null);
   const muxerRef = useRef<{
     output: Output;
-    target: BufferTarget;
+    target: BufferTarget | StreamTarget;
+    fileSession: RecordingFileSession | null;
     videoSource: EncodedVideoPacketSource;
     audioSource: EncodedAudioPacketSource | null;
     videoTail: Promise<void>;
     audioTail: Promise<void>;
     firstVideo: boolean;
     firstAudio: boolean;
+    pendingVideoPackets: number;
+    pendingAudioPackets: number;
+    muxedVideoPackets: number;
   } | null>(null);
   const useWebCodecsRef = useRef<boolean>(false);
-  const muxedChunkCountRef = useRef<number>(0);
 
   // MediaRecorder refs (fallback - produces WebM)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const recordedChunksRef = useRef<Blob[]>([]);
+  const mediaRecorderSessionRef = useRef<RecordingFileSession | null>(null);
 
   // Audio recording refs
   const audioEncoderRef = useRef<AudioEncoder | null>(null);
@@ -402,6 +416,7 @@ export const RecordingCanvas = forwardRef<
     recordingHeightRef.current = recordingHeight;
     frameRateRef.current = frameRate;
     onFrameErrorRef.current = onFrameError;
+    onFatalErrorRef.current = onFatalError;
     onAnalysersChangedRef.current = onAnalysersChanged;
     captureMicRef.current = captureMic;
     micDeviceIdRef.current = micDeviceId;
@@ -431,6 +446,7 @@ export const RecordingCanvas = forwardRef<
     recordingHeight,
     frameRate,
     onFrameError,
+    onFatalError,
     onAnalysersChanged,
     captureMic,
     micDeviceId,
@@ -648,27 +664,12 @@ export const RecordingCanvas = forwardRef<
     }
   }, [outputWidth, outputHeight, drawSection]);
 
-  /**
-   * Save recording data to the Tauri backend
-   */
-  const saveRecording = useCallback(
-    async (data: ArrayBuffer) => {
-      try {
-        // Send bytes as the raw IPC body (Tauri v2) instead of base64, so long
-        // recordings don't hit the JS max-string-length limit.
-        const savedPath = await invoke<string>("save_media_recording", data);
-
-        console.log(`[Recording] Video saved: ${savedPath}`);
-        window.dispatchEvent(
-          new CustomEvent("recordingSaved", { detail: { path: savedPath } }),
-        );
-      } catch (error) {
-        console.error("[Recording] Error saving video:", error);
-        onFrameErrorRef.current?.(String(error));
-      }
-    },
-    [],
-  );
+  const announceRecordingSaved = useCallback((path: string) => {
+    console.log(`[Recording] Video saved: ${path}`);
+    window.dispatchEvent(
+      new CustomEvent("recordingSaved", { detail: { path } }),
+    );
+  }, []);
 
   /**
    * Acquire a single mixed audio track from mic and/or system audio sources.
@@ -876,7 +877,11 @@ export const RecordingCanvas = forwardRef<
    * thread) and falls back to ScriptProcessorNode for WKWebView compatibility.
    */
   const startAudioProcessing = useCallback(
-    async (audioTrack: MediaStreamTrack, audioEncoder: AudioEncoder) => {
+    async (
+      audioTrack: MediaStreamTrack,
+      audioEncoder: AudioEncoder,
+      pendingMuxPackets: () => number,
+    ) => {
       try {
         // Force stereo: encoder/muxer config uses AUDIO_NUM_CHANNELS.
         const channelCount = AUDIO_NUM_CHANNELS;
@@ -899,6 +904,16 @@ export const RecordingCanvas = forwardRef<
           if (audioEncoder.state !== "configured") return;
           const numFrames = channels[0]?.length ?? 0;
           if (!numFrames) return;
+          // AudioEncoder callbacks cannot await the disk-backed muxer. Preserve
+          // timing but emit silence under extreme storage backpressure instead
+          // of retaining an unbounded queue of PCM and encoded packets.
+          if (
+            audioEncoder.encodeQueueSize > 16 ||
+            pendingMuxPackets() > 64
+          ) {
+            sampleOffset += numFrames;
+            return;
+          }
           const numChannels = channels.length;
           // Build planar Float32 data: [ch0_all_samples, ch1_all_samples, ...]
           const planarData = new Float32Array(numFrames * numChannels);
@@ -1028,6 +1043,8 @@ export const RecordingCanvas = forwardRef<
       // otherwise resolving audio before video below would orphan it.
       let audioEncoder: AudioEncoder | null = null;
       let pendingVideoEncoder: VideoEncoder | null = null;
+      let pendingOutput: Output | null = null;
+      let pendingFileSession: RecordingFileSession | null = null;
 
       try {
         // Lazily load mediabunny (already code-split via the trim editor) — it is
@@ -1072,9 +1089,12 @@ export const RecordingCanvas = forwardRef<
                     const pkt = mb.EncodedPacket.fromEncodedChunk(chunk);
                     const meta = holder.firstAudio ? fixedMeta : undefined;
                     holder.firstAudio = false;
-                    holder.audioTail = holder.audioTail.then(() =>
-                      holder.audioSource!.add(pkt, meta),
-                    );
+                    holder.pendingAudioPackets++;
+                    holder.audioTail = holder.audioTail
+                      .then(() => holder.audioSource!.add(pkt, meta))
+                      .finally(() => {
+                        holder.pendingAudioPackets--;
+                      });
                   }
                   // Track effective audio bitrate to verify CBR behavior in WKWebView.
                   if (audioLogWindowStartRef.current < 0) {
@@ -1145,11 +1165,20 @@ export const RecordingCanvas = forwardRef<
         }
         const hasAudio = audioEncoder !== null;
 
-        const target = new mb.BufferTarget();
+        const fileTarget = isTauri()
+          ? await createFileBackedTarget(mb, "mp4", "capture")
+          : null;
+        const target: BufferTarget | StreamTarget = fileTarget
+          ? fileTarget.target
+          : new mb.BufferTarget();
+        pendingFileSession = fileTarget?.session ?? null;
         const output = new mb.Output({
-          format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }),
+          format: new mb.Mp4OutputFormat({
+            fastStart: fileTarget ? false : "in-memory",
+          }),
           target,
         });
+        pendingOutput = output;
         const videoSource = new mb.EncodedVideoPacketSource("avc");
         output.addVideoTrack(videoSource);
         const audioSource = hasAudio
@@ -1164,12 +1193,16 @@ export const RecordingCanvas = forwardRef<
         const holder = {
           output,
           target,
+          fileSession: pendingFileSession,
           videoSource,
           audioSource,
           videoTail: Promise.resolve(),
           audioTail: Promise.resolve(),
           firstVideo: true,
           firstAudio: true,
+          pendingVideoPackets: 0,
+          pendingAudioPackets: 0,
+          muxedVideoPackets: 0,
         };
 
         pendingVideoEncoder = new VideoEncoder({
@@ -1178,10 +1211,13 @@ export const RecordingCanvas = forwardRef<
               const pkt = mb.EncodedPacket.fromEncodedChunk(chunk);
               const meta = holder.firstVideo ? metadata : undefined;
               holder.firstVideo = false;
-              holder.videoTail = holder.videoTail.then(() =>
-                holder.videoSource.add(pkt, meta),
-              );
-              muxedChunkCountRef.current++;
+              holder.pendingVideoPackets++;
+              holder.videoTail = holder.videoTail
+                .then(() => holder.videoSource.add(pkt, meta))
+                .finally(() => {
+                  holder.pendingVideoPackets--;
+                });
+              holder.muxedVideoPackets++;
             } catch (error) {
               console.error("[WebCodecs] Failed to mux video chunk:", error);
             }
@@ -1204,7 +1240,11 @@ export const RecordingCanvas = forwardRef<
 
         if (audioEncoder && audioTrack) {
           audioEncoderRef.current = audioEncoder;
-          await startAudioProcessing(audioTrack, audioEncoder);
+          await startAudioProcessing(
+            audioTrack,
+            audioEncoder,
+            () => holder.pendingAudioPackets,
+          );
           console.log(
             `[WebCodecs] Audio encoder initialized: ${AUDIO_NUM_CHANNELS}ch @ ${audioSampleRate}Hz`,
           );
@@ -1212,8 +1252,9 @@ export const RecordingCanvas = forwardRef<
 
         videoEncoderRef.current = pendingVideoEncoder;
         muxerRef.current = holder;
+        pendingOutput = null;
+        pendingFileSession = null;
         useWebCodecsRef.current = true;
-        muxedChunkCountRef.current = 0;
 
         console.log(
           `[WebCodecs] Initialized: ${width}x${height} @ ${fps}fps, H.264 -> MP4${hasAudio ? " + AAC audio" : ""}`,
@@ -1239,6 +1280,14 @@ export const RecordingCanvas = forwardRef<
         } catch {
           /* may be unconfigured/closed; ignore */
         }
+        try {
+          await pendingOutput?.cancel();
+        } catch {
+          // The backend session is aborted below even if the muxer cannot close.
+        }
+        await pendingFileSession?.abort().catch(() => {});
+        audioProcessingCleanupRef.current?.();
+        audioProcessingCleanupRef.current = null;
         videoEncoderRef.current = null;
         audioEncoderRef.current = null;
         muxerRef.current = null;
@@ -1253,15 +1302,15 @@ export const RecordingCanvas = forwardRef<
    * Initialize MediaRecorder (fallback for browsers without WebCodecs)
    */
   const initializeMediaRecorder = useCallback(
-    (
+    async (
       canvas: HTMLCanvasElement,
       width: number,
       height: number,
       fps: number,
       audioTrack?: MediaStreamTrack | null,
-    ) => {
+    ): Promise<void> => {
       const stream = captureRecordingStream(canvas, fps, audioTrack);
-      recordedChunksRef.current = [];
+      const browserChunks: Blob[] = [];
 
       const candidates = audioTrack
         ? [
@@ -1281,40 +1330,129 @@ export const RecordingCanvas = forwardRef<
         "video/webm";
 
       console.log(`[MediaRecorder] Fallback codec: ${mimeType}`);
+      const fileSession = isTauri()
+        ? await RecordingFileSession.begin("webm", "capture")
+        : null;
+      mediaRecorderSessionRef.current = fileSession;
+      let writeTail = Promise.resolve();
+      let nextPosition = 0;
+      let pendingBytes = 0;
+      let writeFailure: unknown = null;
+      let fatalReported = false;
 
-      const recorder = new MediaRecorder(stream, {
-        mimeType,
-        videoBitsPerSecond: videoBitrate,
-      });
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          recordedChunksRef.current.push(event.data);
-        }
+      const reportFatal = (error: unknown) => {
+        if (fatalReported) return;
+        fatalReported = true;
+        const message = String(error);
+        console.error("[MediaRecorder] Fatal recording error:", error);
+        onFatalErrorRef.current?.(message);
+        if (!onFatalErrorRef.current) onFrameErrorRef.current?.(message);
       };
 
-      recorder.onstop = async () => {
+      try {
+        const recorder = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: videoBitrate,
+        });
+
+        recorder.ondataavailable = (event) => {
+          if (!event.data || event.data.size === 0 || writeFailure) return;
+          if (!fileSession) {
+            browserChunks.push(event.data);
+            return;
+          }
+
+          const byteSize = event.data.size;
+          if (pendingBytes + byteSize > MEDIA_RECORDER_PENDING_BYTES_LIMIT) {
+            writeFailure = new Error(
+              "Recording storage could not keep up with MediaRecorder",
+            );
+            reportFatal(writeFailure);
+            if (recorder.state !== "inactive") recorder.stop();
+            return;
+          }
+
+          const position = nextPosition;
+          nextPosition += byteSize;
+          pendingBytes += byteSize;
+          const chunk = event.data;
+          writeTail = writeTail
+            .then(async () => {
+              const bytes = new Uint8Array(await chunk.arrayBuffer());
+              await fileSession.write(position, bytes);
+            })
+            .catch((error) => {
+              writeFailure = error;
+              reportFatal(error);
+              if (recorder.state !== "inactive") recorder.stop();
+            })
+            .finally(() => {
+              pendingBytes -= byteSize;
+            });
+        };
+
+        recorder.onstop = async () => {
+          if (mediaRecorderRef.current === recorder) {
+            mediaRecorderRef.current = null;
+          }
+          await writeTail;
+          if (fileSession) {
+            if (writeFailure) {
+              await fileSession.abort().catch(() => {});
+              if (mediaRecorderSessionRef.current === fileSession) {
+                mediaRecorderSessionRef.current = null;
+              }
+              return;
+            }
+            try {
+              const artifact = await fileSession.finalize();
+              console.log(
+                `[MediaRecorder] WebM finalized: ${artifact.byteSize} bytes`,
+              );
+              announceRecordingSaved(artifact.path);
+            } catch (error) {
+              reportFatal(error);
+            } finally {
+              if (mediaRecorderSessionRef.current === fileSession) {
+                mediaRecorderSessionRef.current = null;
+              }
+            }
+            return;
+          }
+
+          console.log(
+            `[MediaRecorder] Recording stopped, ${browserChunks.length} chunks collected`,
+          );
+          const blob = new Blob(browserChunks, { type: mimeType });
+          console.log(`[MediaRecorder] Final video size: ${blob.size} bytes`);
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = `recording_${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+          anchor.click();
+          window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        };
+
+        recorder.onerror = (event) => {
+          writeFailure = new Error("MediaRecorder error");
+          console.error("[MediaRecorder] Recording error:", event);
+          reportFatal(writeFailure);
+        };
+
+        mediaRecorderRef.current = recorder;
+        useWebCodecsRef.current = false;
         console.log(
-          `[MediaRecorder] Recording stopped, ${recordedChunksRef.current.length} chunks collected`,
+          `[MediaRecorder] Initialized: ${width}x${height} @ ${fps}fps`,
         );
-        const blob = new Blob(recordedChunksRef.current, { type: mimeType });
-        console.log(`[MediaRecorder] Final video size: ${blob.size} bytes`);
-        const buffer = await blob.arrayBuffer();
-        await saveRecording(buffer);
-      };
-
-      recorder.onerror = (event) => {
-        console.error("[MediaRecorder] Recording error:", event);
-        onFrameErrorRef.current?.("MediaRecorder error");
-      };
-
-      mediaRecorderRef.current = recorder;
-      useWebCodecsRef.current = false;
-      console.log(
-        `[MediaRecorder] Initialized: ${width}x${height} @ ${fps}fps`,
-      );
+      } catch (error) {
+        await fileSession?.abort().catch(() => {});
+        if (mediaRecorderSessionRef.current === fileSession) {
+          mediaRecorderSessionRef.current = null;
+        }
+        throw error;
+      }
     },
-    [saveRecording, videoBitrate],
+    [announceRecordingSaved, videoBitrate],
   );
 
   /**
@@ -1341,7 +1479,9 @@ export const RecordingCanvas = forwardRef<
       if (
         useWebCodecsRef.current &&
         encoder &&
-        encoder.encodeQueueSize > encodeQueueLimitRef.current
+        (encoder.encodeQueueSize > encodeQueueLimitRef.current ||
+          (muxerRef.current?.pendingVideoPackets ?? 0) >
+            Math.max(4, encodeQueueLimitRef.current * 2))
       ) {
         droppedFrameCountRef.current++;
         return;
@@ -1488,7 +1628,10 @@ export const RecordingCanvas = forwardRef<
           }
           videoEncoderRef.current = null;
           audioEncoderRef.current = null;
+          const canceledMuxer = muxerRef.current;
           muxerRef.current = null;
+          await canceledMuxer?.output.cancel().catch(() => {});
+          await canceledMuxer?.fileSession?.abort().catch(() => {});
           if (audioTrack) audioTrack.stop();
           if (audioContextRef.current) {
             audioContextRef.current.close().catch(() => {});
@@ -1498,9 +1641,16 @@ export const RecordingCanvas = forwardRef<
           return;
         }
         if (!webCodecsReady) {
-          initializeMediaRecorder(canvas, width, height, fps, audioTrack);
+          await initializeMediaRecorder(canvas, width, height, fps, audioTrack);
           const recorder = mediaRecorderRef.current;
           if (!recorder) throw new Error("MediaRecorder not initialized");
+          if (cancelled) {
+            mediaRecorderRef.current = null;
+            const session = mediaRecorderSessionRef.current;
+            mediaRecorderSessionRef.current = null;
+            await session?.abort().catch(() => {});
+            return;
+          }
           recorder.start(1000);
         }
 
@@ -1559,7 +1709,8 @@ export const RecordingCanvas = forwardRef<
         }, 1000);
       } catch (error) {
         console.error("[RecordingCanvas] Failed to start recording:", error);
-        onFrameErrorRef.current?.(String(error));
+        onFatalErrorRef.current?.(String(error));
+        if (!onFatalErrorRef.current) onFrameErrorRef.current?.(String(error));
       }
     };
 
@@ -1633,10 +1784,12 @@ export const RecordingCanvas = forwardRef<
                 audioEncoder.close();
               }
 
-              if (muxedChunkCountRef.current === 0) {
+              if (muxer.muxedVideoPackets === 0) {
                 console.warn(
                   "[WebCodecs] No video chunks were successfully muxed, skipping finalization",
                 );
+                await muxer.output.cancel().catch(() => {});
+                await muxer.fileSession?.abort().catch(() => {});
                 return;
               }
 
@@ -1644,27 +1797,35 @@ export const RecordingCanvas = forwardRef<
               // file is sealed (mediabunny add()/finalize() are async).
               await Promise.all([muxer.videoTail, muxer.audioTail]);
               await muxer.output.finalize();
-              const mp4Buffer = muxer.target.buffer as ArrayBuffer;
-              // Copy the bytes for the trim editor before saveRecording reads
-              // them. Only this WebCodecs/MP4 path emits the edit event — the
-              // MediaRecorder/WebM fallback doesn't — so the editor only ever
-              // opens for a seekable MP4.
-              const editBlob = new Blob([mp4Buffer], { type: "video/mp4" });
-              console.log(
-                `[WebCodecs] MP4 finalized: ${mp4Buffer.byteLength} bytes (${muxedChunkCountRef.current} chunks)`,
-              );
-              await saveRecording(mp4Buffer);
-              window.dispatchEvent(
-                new CustomEvent("recordingReadyForEdit", {
-                  detail: { blob: editBlob },
-                }),
-              );
+              if (muxer.fileSession) {
+                const artifact = await muxer.fileSession.finalize();
+                console.log(
+                  `[WebCodecs] MP4 finalized: ${artifact.byteSize} bytes (${muxer.muxedVideoPackets} chunks)`,
+                );
+                announceRecordingSaved(artifact.path);
+                dispatchRecordingReadyForEdit({ kind: "file", artifact });
+              } else {
+                const mp4Buffer = (muxer.target as BufferTarget)
+                  .buffer as ArrayBuffer;
+                console.log(
+                  `[WebCodecs] MP4 finalized in memory: ${mp4Buffer.byteLength} bytes (${muxer.muxedVideoPackets} chunks)`,
+                );
+                dispatchRecordingReadyForEdit({
+                  kind: "blob",
+                  blob: new Blob([mp4Buffer], { type: "video/mp4" }),
+                });
+              }
             } catch (error) {
+              await muxer.output.cancel().catch(() => {});
+              await muxer.fileSession?.abort().catch(() => {});
               console.error(
                 "[WebCodecs] Error finalizing recording:",
                 error,
               );
-              onFrameErrorRef.current?.(String(error));
+              onFatalErrorRef.current?.(String(error));
+              if (!onFatalErrorRef.current) {
+                onFrameErrorRef.current?.(String(error));
+              }
             }
           })();
         }
@@ -1686,6 +1847,10 @@ export const RecordingCanvas = forwardRef<
               error,
             );
           }
+        } else if (mediaRecorderSessionRef.current) {
+          const session = mediaRecorderSessionRef.current;
+          mediaRecorderSessionRef.current = null;
+          session.abort().catch(() => {});
         }
       }
 
@@ -1713,7 +1878,7 @@ export const RecordingCanvas = forwardRef<
     initializeWebCodecs,
     initializeMediaRecorder,
     updateFrame,
-    saveRecording,
+    announceRecordingSaved,
     triggerSoundbite,
   ]);
 
