@@ -5,7 +5,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Monitor, Camera, X } from "lucide-react";
+import { Monitor, Camera } from "lucide-react";
 
 interface RecordModalProps {
   open: boolean;
@@ -16,64 +16,60 @@ interface RecordModalProps {
   onClear?: () => void;
 }
 
-export function RecordModal({ 
-  open, 
-  onOpenChange, 
-  onSelectOption, 
+export function RecordModal({
+  open,
+  onOpenChange,
+  onSelectOption,
   sectionIndex,
   hasExistingSource = false,
   onClear,
 }: RecordModalProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-w-[380px]">
         <DialogHeader>
           <DialogTitle>
-            {hasExistingSource ? "Change" : "Record to"} Section {sectionIndex + 1}
+            {hasExistingSource ? "Change" : "Add Source to"} Section{" "}
+            {sectionIndex + 1}
           </DialogTitle>
         </DialogHeader>
-        <div className="grid grid-cols-2 gap-4 py-4">
-          <Button
-            variant="outline"
-            className="h-32 flex flex-col gap-3 hover:bg-accent hover:border-primary bg-transparent"
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            className="h-24 rounded-xl bg-fill hover:bg-fill-hover flex flex-col items-center justify-center gap-2 motion-safe:active:scale-[0.98] transition-[transform,background-color,color] duration-100 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
             onClick={() => {
               onSelectOption("screen");
               onOpenChange(false);
             }}
           >
-            <Monitor className="h-10 w-10" />
-            <span className="font-medium">Record Screen</span>
-            <span className="text-xs text-muted-foreground">
-              Share your display
+            <Monitor className="h-7 w-7 text-foreground" />
+            <span className="text-headline text-foreground">Screen</span>
+            <span className="text-caption text-muted-foreground">
+              Capture a display or region
             </span>
-          </Button>
-          <Button
-            variant="outline"
-            className="h-32 flex flex-col gap-3 hover:bg-accent hover:border-primary bg-transparent"
+          </button>
+          <button
+            className="h-24 rounded-xl bg-fill hover:bg-fill-hover flex flex-col items-center justify-center gap-2 motion-safe:active:scale-[0.98] transition-[transform,background-color,color] duration-100 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
             onClick={() => {
               onSelectOption("camera");
               onOpenChange(false);
             }}
           >
-            <Camera className="h-10 w-10" />
-            <span className="font-medium">Record Camera</span>
-            <span className="text-xs text-muted-foreground">
-              Use webcam input
+            <Camera className="h-7 w-7 text-foreground" />
+            <span className="text-headline text-foreground">Camera</span>
+            <span className="text-caption text-muted-foreground">
+              Use a connected camera
             </span>
-          </Button>
+          </button>
         </div>
-        
         {hasExistingSource && onClear && (
-          <div className="border-t pt-4">
+          <div className="flex border-t border-separator pt-3">
             <Button
-              variant="ghost"
-              className="w-full text-destructive hover:text-destructive hover:bg-destructive/10"
+              variant="destructive"
               onClick={() => {
                 onClear();
                 onOpenChange(false);
               }}
             >
-              <X className="h-4 w-4 mr-2" />
               Clear Section
             </Button>
           </div>

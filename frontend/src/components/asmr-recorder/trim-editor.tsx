@@ -12,6 +12,8 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
 import {
@@ -248,7 +250,7 @@ function ThumbnailCanvas({
       ref={ref}
       onClick={onClick}
       title={`Seek to ${formatTime(wc.timestamp)}`}
-      className="h-9 flex-1 min-w-0 cursor-pointer rounded-sm opacity-80 hover:opacity-100 transition-opacity"
+      className="h-9 flex-1 min-w-0 cursor-pointer opacity-80 hover:opacity-100 transition-opacity"
     />
   );
 }
@@ -509,7 +511,7 @@ export function TrimEditor() {
         if (!open && !isExporting) close();
       }}
     >
-      <DialogContent className="max-w-2xl overflow-hidden">
+      <DialogContent className="max-w-[720px] w-[calc(100vw-48px)]">
         <DialogHeader>
           <DialogTitle>Trim recording</DialogTitle>
           <DialogDescription>
@@ -526,7 +528,7 @@ export function TrimEditor() {
             onDurationChange={adoptDuration}
             onTimeUpdate={handleTimeUpdate}
             onEnded={() => setIsPlaying(false)}
-            className="w-full rounded-md bg-black aspect-video"
+            className="w-full rounded-lg bg-stage aspect-video max-h-[calc(100vh-280px)]"
             playsInline
           />
         )}
@@ -544,14 +546,14 @@ export function TrimEditor() {
             onValueCommit={handleValueCommit}
             disabled={isExporting || duration === 0}
           >
-            <SliderPrimitive.Track className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary">
+            <SliderPrimitive.Track className="relative h-1 w-full grow overflow-hidden rounded-full bg-fill">
               {/* Inert bands for non-active keep-segments */}
               {duration > 0 &&
                 segments.map((seg, i) =>
                   i !== activeSegIdx ? (
                     <div
                       key={i}
-                      className="absolute top-0 h-full bg-primary/40 cursor-pointer hover:bg-primary/60 transition-colors"
+                      className="absolute top-0 h-full bg-accent/30 cursor-pointer hover:bg-accent/45 transition-colors"
                       style={{
                         left: `${(seg.in / duration) * 100}%`,
                         width: `${((seg.out - seg.in) / duration) * 100}%`,
@@ -563,15 +565,15 @@ export function TrimEditor() {
                     />
                   ) : null,
                 )}
-              <SliderPrimitive.Range className="absolute h-full bg-primary" />
+              <SliderPrimitive.Range className="absolute h-full bg-accent" />
             </SliderPrimitive.Track>
             {[0, 1].map((i) => (
               <SliderPrimitive.Thumb
                 key={i}
                 className={cn(
-                  "block h-5 w-5 rounded-full border-2 border-primary bg-background ring-offset-background transition-colors",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                  "disabled:pointer-events-none disabled:opacity-50",
+                  "block h-4 w-4 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,.25),0_0_0_0.5px_rgba(0,0,0,.1)]",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+                  "disabled:pointer-events-none disabled:opacity-40",
                 )}
               />
             ))}
@@ -579,7 +581,7 @@ export function TrimEditor() {
 
           {/* Thumbnail filmstrip */}
           {thumbnails.length > 0 && (
-            <div className="flex gap-0.5">
+            <div className="flex gap-px rounded-md overflow-hidden">
               {thumbnails.map((wc, i) => (
                 <ThumbnailCanvas
                   key={i}
@@ -592,10 +594,10 @@ export function TrimEditor() {
             </div>
           )}
 
-          <div className="flex items-center justify-between text-sm font-mono text-muted-foreground">
-            <span>In {formatTime(inPoint)}</span>
-            <span>Keeping {formatTime(totalKeptDuration)}</span>
-            <span>Out {formatTime(outPoint)}</span>
+          <div className="flex items-center justify-between text-callout tabular-nums">
+            <span><span className="text-muted-foreground">In</span> {formatTime(inPoint)}</span>
+            <span><span className="text-muted-foreground">Keeping</span> {formatTime(totalKeptDuration)}</span>
+            <span><span className="text-muted-foreground">Out</span> {formatTime(outPoint)}</span>
           </div>
 
           {/* Active segment selector chips (only shown when multiple segments) */}
@@ -605,10 +607,10 @@ export function TrimEditor() {
                 <div
                   key={i}
                   className={cn(
-                    "flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono border cursor-pointer",
+                    "flex items-center gap-1 rounded-md h-6 px-2 text-caption tabular-nums cursor-pointer",
                     i === activeSegIdx
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-background text-muted-foreground border-border hover:border-primary/50",
+                      ? "bg-accent text-accent-foreground"
+                      : "bg-fill text-muted-foreground hover:bg-fill-hover",
                   )}
                   onClick={() => {
                     setActiveSegIdx(i);
@@ -616,16 +618,21 @@ export function TrimEditor() {
                   }}
                 >
                   {formatTime(seg.in)}–{formatTime(seg.out)}
-                  <button
-                    className="ml-0.5 opacity-60 hover:opacity-100"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveSegment(i);
-                    }}
-                    title="Remove this segment"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        className="ml-0.5 opacity-60 hover:opacity-100"
+                        aria-label="Remove this segment"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveSegment(i);
+                        }}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove segment</TooltipContent>
+                  </Tooltip>
                 </div>
               ))}
             </div>
@@ -647,7 +654,7 @@ export function TrimEditor() {
               Preview
             </Button>
             <Button
-              variant="outline"
+              variant="default"
               onClick={handleCutSelection}
               disabled={isExporting || duration === 0 || outPoint - inPoint < 0.1}
               title="Remove the selected range from the clip"
@@ -657,12 +664,10 @@ export function TrimEditor() {
             </Button>
           </div>
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-1.5 text-sm text-muted-foreground cursor-pointer select-none">
-              <input
-                type="checkbox"
+            <label className="flex items-center gap-1.5 text-body text-muted-foreground cursor-pointer select-none">
+              <Switch
                 checked={frameAccurate}
-                onChange={(e) => setFrameAccurate(e.target.checked)}
-                className="h-3.5 w-3.5 accent-primary"
+                onCheckedChange={setFrameAccurate}
               />
               Frame-accurate
             </label>
@@ -672,9 +677,11 @@ export function TrimEditor() {
                 onClick={close}
                 disabled={isExporting}
               >
-                Skip
+                Close
               </Button>
               <Button
+                variant="accent"
+                size="lg"
                 onClick={handleExport}
                 disabled={isExporting || totalKeptDuration <= 0}
               >
@@ -683,7 +690,7 @@ export function TrimEditor() {
                 ) : (
                   <Scissors className="h-4 w-4" />
                 )}
-                Save trimmed clip
+                Save Trimmed Clip
               </Button>
             </div>
           </div>

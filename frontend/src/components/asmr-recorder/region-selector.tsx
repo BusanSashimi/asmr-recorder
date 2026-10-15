@@ -1,6 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { createPortal } from "react-dom";
+import { animate, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
-import { Check, X, Move, Maximize2 } from "lucide-react";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { Check, X, Maximize2 } from "lucide-react";
+import { spring, rubberband } from "@/lib/motion";
 
 interface RegionSelectorProps {
   open: boolean;
@@ -28,7 +32,6 @@ export function RegionSelector({
   screenHeight = 1080,
   stream,
 }: RegionSelectorProps) {
-  // Default to center region
   const [region, setRegion] = useState<Region>({
     x: screenWidth * 0.25,
     y: screenHeight * 0.25,
@@ -40,10 +43,16 @@ export function RegionSelector({
   const [isResizing, setIsResizing] = useState<string | null>(null);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [regionStart, setRegionStart] = useState<Region>(region);
+  const [visualOffset, setVisualOffset] = useState({ x: 0, y: 0 });
+
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const visualOffsetRef = useRef({ x: 0, y: 0 });
+  const animXRef = useRef<{ stop: () => void } | null>(null);
+  const animYRef = useRef<{ stop: () => void } | null>(null);
+  const offsetSamplesRef = useRef<Array<{ x: number; y: number; t: number }>>([]);
+  const prefersReducedMotion = useReducedMotion();
 
-  // Scale factor for preview (fit screen in viewport)
   const scale = Math.min(
     (window.innerWidth - 100) / screenWidth,
     (window.innerHeight - 200) / screenHeight,
@@ -53,120 +62,196 @@ export function RegionSelector({
   const scaledWidth = screenWidth * scale;
   const scaledHeight = screenHeight * scale;
 
-  const handleMouseDown = useCallback((e: React.MouseEvent, action: "drag" | string) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent, action: "drag" | string) => {
+      e.preventDefault();
+      e.stopPropagation();
 
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
+      animXRef.current?.stop();
+      animYRef.current?.stop();
+      visualOffsetRef.current = { x: 0, y: 0 };
+      setVisualOffset({ x: 0, y: 0 });
+      offsetSamplesRef.current = [];
 
-    const mouseX = (e.clientX - rect.left) / scale;
-    const mouseY = (e.clientY - rect.top) / scale;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
 
-    setDragStart({ x: mouseX, y: mouseY });
-    setRegionStart({ ...region });
+      const ptrX = (e.clientX - rect.left) / scale;
+      const ptrY = (e.clientY - rect.top) / scale;
 
-    if (action === "drag") {
-      setIsDragging(true);
-    } else {
-      setIsResizing(action);
-    }
-  }, [region, scale]);
+      setDragStart({ x: ptrX, y: ptrY });
+      setRegionStart({ ...region });
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!isDragging && !isResizing) return;
-
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const mouseX = (e.clientX - rect.left) / scale;
-    const mouseY = (e.clientY - rect.top) / scale;
-
-    const deltaX = mouseX - dragStart.x;
-    const deltaY = mouseY - dragStart.y;
-
-    if (isDragging) {
-      // Move the region
-      let newX = regionStart.x + deltaX;
-      let newY = regionStart.y + deltaY;
-
-      // Constrain to screen bounds
-      newX = Math.max(0, Math.min(screenWidth - regionStart.width, newX));
-      newY = Math.max(0, Math.min(screenHeight - regionStart.height, newY));
-
-      setRegion({
-        ...regionStart,
-        x: newX,
-        y: newY,
-      });
-    } else if (isResizing) {
-      // Resize the region
-      let newRegion = { ...regionStart };
-
-      switch (isResizing) {
-        case "nw":
-          newRegion.width = Math.max(MIN_SIZE, regionStart.width - deltaX);
-          newRegion.height = Math.max(MIN_SIZE, regionStart.height - deltaY);
-          newRegion.x = regionStart.x + regionStart.width - newRegion.width;
-          newRegion.y = regionStart.y + regionStart.height - newRegion.height;
-          break;
-        case "ne":
-          newRegion.width = Math.max(MIN_SIZE, regionStart.width + deltaX);
-          newRegion.height = Math.max(MIN_SIZE, regionStart.height - deltaY);
-          newRegion.y = regionStart.y + regionStart.height - newRegion.height;
-          break;
-        case "sw":
-          newRegion.width = Math.max(MIN_SIZE, regionStart.width - deltaX);
-          newRegion.height = Math.max(MIN_SIZE, regionStart.height + deltaY);
-          newRegion.x = regionStart.x + regionStart.width - newRegion.width;
-          break;
-        case "se":
-          newRegion.width = Math.max(MIN_SIZE, regionStart.width + deltaX);
-          newRegion.height = Math.max(MIN_SIZE, regionStart.height + deltaY);
-          break;
-        case "n":
-          newRegion.height = Math.max(MIN_SIZE, regionStart.height - deltaY);
-          newRegion.y = regionStart.y + regionStart.height - newRegion.height;
-          break;
-        case "s":
-          newRegion.height = Math.max(MIN_SIZE, regionStart.height + deltaY);
-          break;
-        case "e":
-          newRegion.width = Math.max(MIN_SIZE, regionStart.width + deltaX);
-          break;
-        case "w":
-          newRegion.width = Math.max(MIN_SIZE, regionStart.width - deltaX);
-          newRegion.x = regionStart.x + regionStart.width - newRegion.width;
-          break;
+      if (action === "drag") {
+        setIsDragging(true);
+      } else {
+        setIsResizing(action);
       }
 
-      // Constrain to screen bounds
-      newRegion.x = Math.max(0, newRegion.x);
-      newRegion.y = Math.max(0, newRegion.y);
-      newRegion.width = Math.min(screenWidth - newRegion.x, newRegion.width);
-      newRegion.height = Math.min(screenHeight - newRegion.y, newRegion.height);
+      // Capture pointer on the container so pointermove/pointerup arrive there
+      containerRef.current?.setPointerCapture(e.pointerId);
+    },
+    [region, scale]
+  );
 
-      setRegion(newRegion);
-    }
-  }, [isDragging, isResizing, dragStart, regionStart, scale, screenWidth, screenHeight]);
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (!isDragging && !isResizing) return;
 
-  const handleMouseUp = useCallback(() => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const ptrX = (e.clientX - rect.left) / scale;
+      const ptrY = (e.clientY - rect.top) / scale;
+
+      const deltaX = ptrX - dragStart.x;
+      const deltaY = ptrY - dragStart.y;
+
+      if (isDragging) {
+        const rawX = regionStart.x + deltaX;
+        const rawY = regionStart.y + deltaY;
+
+        const clampedX = Math.max(0, Math.min(screenWidth - regionStart.width, rawX));
+        const clampedY = Math.max(0, Math.min(screenHeight - regionStart.height, rawY));
+
+        setRegion({ ...regionStart, x: clampedX, y: clampedY });
+
+        // Rubber-band: overshoot in CSS pixels
+        const overshootX = (rawX - clampedX) * scale;
+        const overshootY = (rawY - clampedY) * scale;
+        const vx = overshootX !== 0 ? rubberband(overshootX, scaledWidth) : 0;
+        const vy = overshootY !== 0 ? rubberband(overshootY, scaledHeight) : 0;
+
+        visualOffsetRef.current = { x: vx, y: vy };
+        setVisualOffset({ x: vx, y: vy });
+
+        const sample = { x: vx, y: vy, t: e.timeStamp };
+        offsetSamplesRef.current.push(sample);
+        if (offsetSamplesRef.current.length > 5) offsetSamplesRef.current.shift();
+      } else if (isResizing) {
+        const newRegion = { ...regionStart };
+
+        switch (isResizing) {
+          case "nw":
+            newRegion.width = Math.max(MIN_SIZE, regionStart.width - deltaX);
+            newRegion.height = Math.max(MIN_SIZE, regionStart.height - deltaY);
+            newRegion.x = regionStart.x + regionStart.width - newRegion.width;
+            newRegion.y = regionStart.y + regionStart.height - newRegion.height;
+            break;
+          case "ne":
+            newRegion.width = Math.max(MIN_SIZE, regionStart.width + deltaX);
+            newRegion.height = Math.max(MIN_SIZE, regionStart.height - deltaY);
+            newRegion.y = regionStart.y + regionStart.height - newRegion.height;
+            break;
+          case "sw":
+            newRegion.width = Math.max(MIN_SIZE, regionStart.width - deltaX);
+            newRegion.height = Math.max(MIN_SIZE, regionStart.height + deltaY);
+            newRegion.x = regionStart.x + regionStart.width - newRegion.width;
+            break;
+          case "se":
+            newRegion.width = Math.max(MIN_SIZE, regionStart.width + deltaX);
+            newRegion.height = Math.max(MIN_SIZE, regionStart.height + deltaY);
+            break;
+          case "n":
+            newRegion.height = Math.max(MIN_SIZE, regionStart.height - deltaY);
+            newRegion.y = regionStart.y + regionStart.height - newRegion.height;
+            break;
+          case "s":
+            newRegion.height = Math.max(MIN_SIZE, regionStart.height + deltaY);
+            break;
+          case "e":
+            newRegion.width = Math.max(MIN_SIZE, regionStart.width + deltaX);
+            break;
+          case "w":
+            newRegion.width = Math.max(MIN_SIZE, regionStart.width - deltaX);
+            newRegion.x = regionStart.x + regionStart.width - newRegion.width;
+            break;
+        }
+
+        newRegion.x = Math.max(0, newRegion.x);
+        newRegion.y = Math.max(0, newRegion.y);
+        newRegion.width = Math.min(screenWidth - newRegion.x, newRegion.width);
+        newRegion.height = Math.min(screenHeight - newRegion.y, newRegion.height);
+
+        setRegion(newRegion);
+      }
+    },
+    [
+      isDragging,
+      isResizing,
+      dragStart,
+      regionStart,
+      scale,
+      screenWidth,
+      screenHeight,
+      scaledWidth,
+      scaledHeight,
+    ]
+  );
+
+  const handlePointerUp = useCallback(() => {
+    const wasDragging = isDragging;
     setIsDragging(false);
     setIsResizing(null);
+
+    if (!wasDragging) {
+      visualOffsetRef.current = { x: 0, y: 0 };
+      setVisualOffset({ x: 0, y: 0 });
+      return;
+    }
+
+    // Compute release velocity from tracked visual-offset samples
+    const samples = offsetSamplesRef.current;
+    let velX = 0;
+    let velY = 0;
+    if (samples.length >= 2) {
+      const last = samples[samples.length - 1];
+      const prev = samples[samples.length - 2];
+      const dt = (last.t - prev.t) / 1000;
+      if (dt > 0) {
+        velX = (last.x - prev.x) / dt;
+        velY = (last.y - prev.y) / dt;
+      }
+    }
+
+    const { x: startX, y: startY } = visualOffsetRef.current;
+
+    if (Math.abs(startX) > 0.5 && !prefersReducedMotion) {
+      animXRef.current = animate(startX, 0, {
+        ...spring.momentum,
+        velocity: velX,
+        onUpdate: (v: number) => {
+          visualOffsetRef.current.x = v;
+          setVisualOffset((prev) => ({ ...prev, x: v }));
+        },
+      }) as unknown as { stop: () => void };
+    } else {
+      visualOffsetRef.current.x = 0;
+      setVisualOffset((prev) => ({ ...prev, x: 0 }));
+    }
+
+    if (Math.abs(startY) > 0.5 && !prefersReducedMotion) {
+      animYRef.current = animate(startY, 0, {
+        ...spring.momentum,
+        velocity: velY,
+        onUpdate: (v: number) => {
+          visualOffsetRef.current.y = v;
+          setVisualOffset((prev) => ({ ...prev, y: v }));
+        },
+      }) as unknown as { stop: () => void };
+    } else {
+      visualOffsetRef.current.y = 0;
+      setVisualOffset((prev) => ({ ...prev, y: 0 }));
+    }
+  }, [isDragging, prefersReducedMotion]);
+
+  const handlePointerCancel = useCallback(() => {
+    setIsDragging(false);
+    setIsResizing(null);
+    visualOffsetRef.current = { x: 0, y: 0 };
+    setVisualOffset({ x: 0, y: 0 });
   }, []);
 
-  // Global mouse up listener
-  useEffect(() => {
-    const handleGlobalMouseUp = () => {
-      setIsDragging(false);
-      setIsResizing(null);
-    };
-
-    window.addEventListener("mouseup", handleGlobalMouseUp);
-    return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
-  }, []);
-
-  // Set video srcObject when stream changes
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
@@ -185,19 +270,25 @@ export function RegionSelector({
   if (!open) return null;
 
   const scaledRegion = {
-    x: region.x * scale,
-    y: region.y * scale,
+    x: region.x * scale + visualOffset.x,
+    y: region.y * scale + visualOffset.y,
     width: region.width * scale,
     height: region.height * scale,
   };
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center">
+  // Handle style for the region body (pointer-down action="drag")
+  const handleShadow =
+    "shadow-[0_0_0_1px_hsl(var(--record)),0_1px_3px_rgba(0,0,0,.4)]";
+
+  // Portaled: the preview stage is a size container, which would otherwise
+  // become the containing block for this fixed overlay.
+  return createPortal(
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center">
       <div className="flex flex-col items-center gap-4">
         {/* Header */}
-        <div className="text-white text-center">
-          <h2 className="text-xl font-semibold mb-1">Select Capture Region</h2>
-          <p className="text-sm text-white/70">
+        <div className="text-center">
+          <h2 className="text-title text-white">Select Capture Region</h2>
+          <p className="text-caption text-white/60 mt-0.5">
             Drag to move, resize from corners or edges
           </p>
         </div>
@@ -205,11 +296,11 @@ export function RegionSelector({
         {/* Screen preview container */}
         <div
           ref={containerRef}
-          className="relative bg-gray-900 rounded-lg overflow-hidden shadow-2xl"
+          className="relative bg-stage rounded-lg overflow-hidden shadow-sheet ring-1 ring-white/10"
           style={{ width: scaledWidth, height: scaledHeight }}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
         >
           {/* Video feed background */}
           {stream && (
@@ -224,34 +315,32 @@ export function RegionSelector({
 
           {/* Fallback grid pattern when no stream */}
           {!stream && (
-            <div className="absolute inset-0 bg-gradient-to-br from-gray-800 to-gray-900">
+            <div className="absolute inset-0">
               <div className="absolute inset-0 opacity-10">
-                <div className="w-full h-full" style={{
-                  backgroundImage: `
-                    linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
-                    linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)
-                  `,
-                  backgroundSize: `${50 * scale}px ${50 * scale}px`,
-                }} />
+                <div
+                  className="w-full h-full"
+                  style={{
+                    backgroundImage: `
+                      linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)
+                    `,
+                    backgroundSize: `${50 * scale}px ${50 * scale}px`,
+                  }}
+                />
               </div>
             </div>
           )}
 
-          {/* Darkened areas outside selection */}
+          {/* Outside-selection mask */}
           <div className="absolute inset-0 pointer-events-none">
             {/* Top */}
             <div
-              className="absolute bg-black/60"
-              style={{
-                top: 0,
-                left: 0,
-                right: 0,
-                height: scaledRegion.y,
-              }}
+              className="absolute bg-black/55"
+              style={{ top: 0, left: 0, right: 0, height: scaledRegion.y }}
             />
             {/* Bottom */}
             <div
-              className="absolute bg-black/60"
+              className="absolute bg-black/55"
               style={{
                 top: scaledRegion.y + scaledRegion.height,
                 left: 0,
@@ -261,7 +350,7 @@ export function RegionSelector({
             />
             {/* Left */}
             <div
-              className="absolute bg-black/60"
+              className="absolute bg-black/55"
               style={{
                 top: scaledRegion.y,
                 left: 0,
@@ -271,7 +360,7 @@ export function RegionSelector({
             />
             {/* Right */}
             <div
-              className="absolute bg-black/60"
+              className="absolute bg-black/55"
               style={{
                 top: scaledRegion.y,
                 left: scaledRegion.x + scaledRegion.width,
@@ -290,105 +379,138 @@ export function RegionSelector({
               width: scaledRegion.width,
               height: scaledRegion.height,
             }}
-            onMouseDown={(e) => handleMouseDown(e, "drag")}
+            onPointerDown={(e) => handlePointerDown(e, "drag")}
           >
-            {/* Red border */}
-            <div className="absolute inset-0 border-2 border-red-500 rounded pointer-events-none" />
-            
-            {/* Dashed inner guide */}
-            <div className="absolute inset-2 border border-dashed border-red-500/50 rounded pointer-events-none" />
+            {/* Record-color border, 1.5px */}
+            <div
+              className="absolute inset-0 rounded-sm pointer-events-none"
+              style={{
+                boxShadow: "inset 0 0 0 1.5px hsl(var(--record))",
+              }}
+            />
 
-            {/* Center crosshair */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <Move className="h-6 w-6 text-red-500/50" />
+            {/* Corner handles — 9px white circles */}
+            {/* NW */}
+            <div
+              className="absolute -top-3 -left-3 w-6 h-6 flex items-center justify-center cursor-nw-resize"
+              onPointerDown={(e) => handlePointerDown(e, "nw")}
+            >
+              <div className={`w-[9px] h-[9px] rounded-full bg-white ${handleShadow}`} />
+            </div>
+            {/* NE */}
+            <div
+              className="absolute -top-3 -right-3 w-6 h-6 flex items-center justify-center cursor-ne-resize"
+              onPointerDown={(e) => handlePointerDown(e, "ne")}
+            >
+              <div className={`w-[9px] h-[9px] rounded-full bg-white ${handleShadow}`} />
+            </div>
+            {/* SW */}
+            <div
+              className="absolute -bottom-3 -left-3 w-6 h-6 flex items-center justify-center cursor-sw-resize"
+              onPointerDown={(e) => handlePointerDown(e, "sw")}
+            >
+              <div className={`w-[9px] h-[9px] rounded-full bg-white ${handleShadow}`} />
+            </div>
+            {/* SE */}
+            <div
+              className="absolute -bottom-3 -right-3 w-6 h-6 flex items-center justify-center cursor-se-resize"
+              onPointerDown={(e) => handlePointerDown(e, "se")}
+            >
+              <div className={`w-[9px] h-[9px] rounded-full bg-white ${handleShadow}`} />
             </div>
 
-            {/* Resize handles */}
-            {/* Corners */}
+            {/* Edge handles — 14×6 / 6×14 white capsules */}
+            {/* N */}
             <div
-              className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-red-500 rounded-sm cursor-nw-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "nw")}
-            />
+              className="absolute -top-3 left-1/2 -translate-x-1/2 w-6 h-6 flex items-center justify-center cursor-n-resize"
+              onPointerDown={(e) => handlePointerDown(e, "n")}
+            >
+              <div className={`w-3.5 h-1.5 rounded-full bg-white ${handleShadow}`} />
+            </div>
+            {/* S */}
             <div
-              className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-red-500 rounded-sm cursor-ne-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "ne")}
-            />
+              className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-6 h-6 flex items-center justify-center cursor-s-resize"
+              onPointerDown={(e) => handlePointerDown(e, "s")}
+            >
+              <div className={`w-3.5 h-1.5 rounded-full bg-white ${handleShadow}`} />
+            </div>
+            {/* W */}
             <div
-              className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-red-500 rounded-sm cursor-sw-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "sw")}
-            />
+              className="absolute top-1/2 -left-3 -translate-y-1/2 w-6 h-6 flex items-center justify-center cursor-w-resize"
+              onPointerDown={(e) => handlePointerDown(e, "w")}
+            >
+              <div className={`w-1.5 h-3.5 rounded-full bg-white ${handleShadow}`} />
+            </div>
+            {/* E */}
             <div
-              className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-red-500 rounded-sm cursor-se-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "se")}
-            />
-            
-            {/* Edge handles */}
-            <div
-              className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-6 h-3 bg-red-500 rounded-sm cursor-n-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "n")}
-            />
-            <div
-              className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-6 h-3 bg-red-500 rounded-sm cursor-s-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "s")}
-            />
-            <div
-              className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-6 bg-red-500 rounded-sm cursor-w-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "w")}
-            />
-            <div
-              className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-6 bg-red-500 rounded-sm cursor-e-resize hover:bg-red-400 transition-colors"
-              onMouseDown={(e) => handleMouseDown(e, "e")}
-            />
+              className="absolute top-1/2 -right-3 -translate-y-1/2 w-6 h-6 flex items-center justify-center cursor-e-resize"
+              onPointerDown={(e) => handlePointerDown(e, "e")}
+            >
+              <div className={`w-1.5 h-3.5 rounded-full bg-white ${handleShadow}`} />
+            </div>
           </div>
 
-          {/* Dimension label */}
+          {/* Dimension label — below the selection box */}
           <div
-            className="absolute bg-red-500 text-white text-xs px-2 py-1 rounded font-mono"
+            className="absolute mat-hud rounded-md text-micro font-mono px-1.5 py-0.5"
             style={{
               left: scaledRegion.x + scaledRegion.width / 2,
               top: scaledRegion.y + scaledRegion.height + 8,
               transform: "translateX(-50%)",
+              pointerEvents: "none",
             }}
           >
             {Math.round(region.width)} × {Math.round(region.height)}
           </div>
         </div>
 
-        {/* Controls */}
-        <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            className="bg-transparent border-white/20 text-white hover:bg-white/10"
-            onClick={onClose}
-          >
-            <X className="h-4 w-4 mr-2" />
-            Cancel
-          </Button>
-          
-          <Button
-            variant="outline"
-            className="bg-transparent border-white/20 text-white hover:bg-white/10"
-            onClick={() => setRegion({ x: 0, y: 0, width: screenWidth, height: screenHeight })}
-          >
-            <Maximize2 className="h-4 w-4 mr-2" />
-            Full Screen
-          </Button>
+        {/* Controls bar */}
+        <div className="mat-hud rounded-xl p-1.5 flex items-center gap-1.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="hud" size="sm" onClick={onClose} aria-label="Cancel">
+                <X className="h-4 w-4 mr-1.5" />
+                Cancel
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Cancel</TooltipContent>
+          </Tooltip>
 
-          <Button
-            className="bg-red-500 hover:bg-red-600 text-white"
-            onClick={handleConfirm}
-          >
-            <Check className="h-4 w-4 mr-2" />
-            Confirm Region
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="hud"
+                size="sm"
+                aria-label="Full Screen"
+                onClick={() =>
+                  setRegion({ x: 0, y: 0, width: screenWidth, height: screenHeight })
+                }
+              >
+                <Maximize2 className="h-4 w-4 mr-1.5" />
+                Full Screen
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Select entire screen</TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="record" size="sm" onClick={handleConfirm} aria-label="Confirm Region">
+                <Check className="h-4 w-4 mr-1.5" />
+                Confirm Region
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Confirm Region</TooltipContent>
+          </Tooltip>
         </div>
 
-        {/* Region info */}
-        <p className="text-white/50 text-xs font-mono">
-          Position: ({Math.round(region.x)}, {Math.round(region.y)}) | 
+        {/* Position/size readout */}
+        <p className="text-caption font-mono text-white/50">
+          Position: ({Math.round(region.x)}, {Math.round(region.y)}) |{" "}
           Size: {Math.round(region.width)} × {Math.round(region.height)}
         </p>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

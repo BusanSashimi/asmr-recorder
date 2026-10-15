@@ -1,106 +1,69 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useRef, useEffect } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Mic,
-  Download,
+  FolderOpen,
+  FolderSearch,
   Square,
   Circle,
-  Settings,
-  Video,
   Volume2,
-  VolumeX,
-  FolderOpen,
-  RotateCcw,
+  Video,
+  ArrowDownCircle,
+  PanelRight,
 } from "lucide-react";
-import { Slider } from "@/components/ui/slider";
 import { toast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
-import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useRecordingContext } from "@/contexts/recording-context";
-import { formatDuration, OUTPUT_RESOLUTIONS } from "@/types/recording";
-import type { VideoQuality, OutputResolution, LayoutType, PipPosition } from "@/types/recording";
-import { LAYOUT_LABELS } from "@/lib/layouts";
-import { gainToDb } from "@/lib/gain-to-db";
+import { formatDuration } from "@/types/recording";
 import { StereoMeter } from "./audio-monitor-graphics";
-import { checkForUpdate, applyUpdate } from "@/lib/updater";
+import { spring } from "@/lib/motion";
 import type { Update } from "@/lib/updater";
 
-interface AudioApp {
-  bundleId: string;
-  name: string;
-  pid: number;
+interface ToolbarProps {
+  inspectorOpen: boolean;
+  onToggleInspector: () => void;
+  pendingUpdate: Update | null;
+  updateProgress: number;
+  isApplyingUpdate: boolean;
+  onApplyUpdate: () => void;
 }
 
-// Sentinel for the "entire system" Select option. Radix <SelectItem> rejects an
-// empty-string value, so the no-app-selected case uses this instead of "".
-const ALL_AUDIO_APPS = "__all__";
-
-export function Toolbar() {
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
-  const [updateProgress, setUpdateProgress] = useState(0);
-  const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
-  // Tracks the most recent recording blob so "Re-edit" can reopen the TrimEditor
-  // without requiring the user to locate the saved file on disk.
-  const [lastBlob, setLastBlob] = useState<Blob | null>(null);
+export function Toolbar({
+  inspectorOpen,
+  onToggleInspector,
+  pendingUpdate,
+  updateProgress,
+  isApplyingUpdate,
+  onApplyUpdate,
+}: ToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Per-app system audio picker — loaded lazily when system audio is enabled
-  const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
-  const audioAppsLoadedRef = useRef(false);
 
   const {
     status,
-    devices,
     sectionState,
-    browserDevices,
-    audioMonitor,
-    systemAudioMonitor,
-    recordingAnalysers,
-    // External frame recording (for 4-section preview)
     externalConfig,
-    updateExternalConfig,
+    recordingAnalysers,
     isExternalRecording,
     startExternalRecording,
     stopExternalRecording,
   } = useRecordingContext();
 
-  // Lazy-load the audio app list when system audio is enabled.
-  const loadAudioApps = useCallback(async () => {
-    if (audioAppsLoadedRef.current) return;
-    audioAppsLoadedRef.current = true;
-    try {
-      const apps = await invoke<AudioApp[]>("list_audio_apps");
-      // Drop apps without a bundleId: they can't be targeted by SCK's bundle
-      // filter, and an empty value crashes the Radix <SelectItem> below.
-      setAudioApps(apps.filter((app) => app.bundleId !== ""));
-    } catch {
-      // SCK may not have permission yet; leave list empty (shows "Entire system" only)
-    }
-  }, []);
+  const isRecording = status.isRecording || isExternalRecording;
 
   // Track output path changes to show save confirmation toast
   const previousOutputPathRef = useRef(status.outputPath);
   useEffect(() => {
-    if (status.outputPath && status.outputPath !== previousOutputPathRef.current) {
+    if (
+      status.outputPath &&
+      status.outputPath !== previousOutputPathRef.current
+    ) {
       const savedPath = status.outputPath;
       toast({
         title: "Recording saved",
@@ -118,20 +81,6 @@ export function Toolbar() {
     previousOutputPathRef.current = status.outputPath;
   }, [status.outputPath]);
 
-  // Capture the blob from each completed recording so "Re-edit" can reopen it.
-  useEffect(() => {
-    const onReady = (e: Event) => {
-      setLastBlob((e as CustomEvent<{ blob: Blob }>).detail.blob);
-    };
-    window.addEventListener("recordingReadyForEdit", onReady);
-    return () => window.removeEventListener("recordingReadyForEdit", onReady);
-  }, []);
-
-  // Clear the stale blob when a new recording starts.
-  useEffect(() => {
-    if (isExternalRecording) setLastBlob(null);
-  }, [isExternalRecording]);
-
   const handleOpenFile = () => fileInputRef.current?.click();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -143,58 +92,9 @@ export function Toolbar() {
     e.target.value = "";
   };
 
-  const handleReEdit = () => {
-    if (!lastBlob) return;
-    window.dispatchEvent(
-      new CustomEvent("recordingReadyForEdit", { detail: { blob: lastBlob } }),
-    );
-  };
-
-  // Check for updates once on mount; surface a toast if one is found.
-  useEffect(() => {
-    checkForUpdate().then((update) => {
-      if (!update) return;
-      setPendingUpdate(update);
-      toast({
-        title: `Update available: v${update.version}`,
-        description: "An Update button will appear in the toolbar.",
-      });
-    });
-  }, []);
-
-  const handleApplyUpdate = async () => {
-    if (!pendingUpdate || isExternalRecording || status.isRecording) return;
-    setIsApplyingUpdate(true);
-    try {
-      await applyUpdate(pendingUpdate, setUpdateProgress);
-    } catch (err) {
-      toast({
-        title: "Update failed",
-        description: String(err),
-        variant: "destructive",
-      });
-      setIsApplyingUpdate(false);
-    }
-  };
-
-  const handleCheckUpdate = async () => {
-    const update = await checkForUpdate();
-    if (update) {
-      setPendingUpdate(update);
-      toast({ title: `Update available: v${update.version}` });
-    } else {
-      toast({ title: "Up to date", description: "No updates available." });
-    }
-  };
-
-  // Check if any section has content (for enabling record button)
-  const hasContent = sectionState.sections.some(
-    (section) => section.source !== null
-  );
-
   const handleRecord = async () => {
     try {
-      if (status.isRecording || isExternalRecording) {
+      if (isRecording) {
         await stopExternalRecording();
         toast({
           title: "Recording stopped",
@@ -216,7 +116,7 @@ export function Toolbar() {
     }
   };
 
-  const handleExport = () => {
+  const handleShowInFinder = () => {
     const path = status.outputPath;
     if (path) {
       revealItemInDir(path).catch(() =>
@@ -229,501 +129,231 @@ export function Toolbar() {
     } else {
       toast({
         title: "No recording",
-        description: "Record something first to export",
+        description: "Record something first",
       });
     }
   };
 
-  // Count active sections for display
+  const hasContent = sectionState.sections.some((s) => s.source !== null);
+
   const activeSectionCount = sectionState.sections.filter(
-    (section) => section.source !== null
+    (s) => s.source !== null,
   ).length;
 
   return (
-    <div className="h-14 border-b border-border bg-card px-4 flex items-center gap-2">
-      {/* Recording Settings */}
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogTrigger asChild>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-2 bg-transparent"
-            disabled={status.isRecording || isExternalRecording}
-          >
-            <Settings className="h-4 w-4" />
-            Settings
-          </Button>
-        </DialogTrigger>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Recording Settings</DialogTitle>
-            <DialogDescription>
-              Configure audio and quality for preview recording
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-6 py-4">
-            {/* Video Info */}
-            <div className="space-y-4">
-              <h4 className="text-sm font-medium flex items-center gap-2">
-                <Video className="h-4 w-4" />
-                Video Sources
-              </h4>
-              <div className="pl-6 text-sm text-muted-foreground">
-                <p>
-                  {activeSectionCount > 0
-                    ? `${activeSectionCount} section${activeSectionCount > 1 ? "s" : ""} active`
-                    : "No sections configured"}
-                </p>
-                <p className="text-xs mt-1">
-                  Add sources by clicking the sections in the preview
-                </p>
-              </div>
-            </div>
-
-            {/* Audio Sources */}
-            <div className="space-y-4">
-              <h4 className="text-sm font-medium flex items-center gap-2">
-                <Volume2 className="h-4 w-4" />
-                Audio Sources
-              </h4>
-              <div className="space-y-3 pl-6">
-                {/* Microphone row */}
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="mic-capture" className="flex items-center gap-2">
-                    <Mic className="h-4 w-4" />
-                    Microphone
-                  </Label>
-                  <div className="flex items-center gap-2">
-                    {externalConfig.captureMic && (
-                      <StereoMeter
-                        analyserL={audioMonitor.analyserL}
-                        analyserR={audioMonitor.analyserR}
-                        className="rounded"
-                      />
-                    )}
-                    <Switch
-                      id="mic-capture"
-                      checked={externalConfig.captureMic}
-                      onCheckedChange={(checked) =>
-                        updateExternalConfig({ captureMic: checked })
-                      }
-                    />
-                  </div>
-                </div>
-                {externalConfig.captureMic && browserDevices.filter(d => d.kind === "audioinput").length > 1 && (
-                  <div className="space-y-1">
-                    <Select
-                      value={externalConfig.micDeviceId ?? "default"}
-                      onValueChange={(value) =>
-                        updateExternalConfig({ micDeviceId: value === "default" ? undefined : value })
-                      }
-                    >
-                      <SelectTrigger className="w-full h-8 text-xs">
-                        <SelectValue placeholder="Default microphone" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="default">Default microphone</SelectItem>
-                        {browserDevices
-                          .filter((d) => d.kind === "audioinput")
-                          .map((d) => (
-                            <SelectItem key={d.deviceId} value={d.deviceId}>
-                              {d.label || `Microphone ${d.deviceId.slice(0, 8)}`}
-                            </SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-                {/* Mic gain slider + mute */}
-                {externalConfig.captureMic && (
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1">
-                        <Label className="text-xs text-muted-foreground">Mic Gain</Label>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-5 w-5 p-0"
-                          title={externalConfig.micMuted ? "Unmute mic" : "Mute mic"}
-                          onClick={() => updateExternalConfig({ micMuted: !externalConfig.micMuted })}
-                        >
-                          {externalConfig.micMuted
-                            ? <VolumeX className="h-3 w-3 text-destructive" />
-                            : <Mic className="h-3 w-3" />}
-                        </Button>
-                      </div>
-                      <span className="text-xs text-muted-foreground tabular-nums">
-                        {externalConfig.micMuted ? "muted" : gainToDb(externalConfig.micGain)}
-                      </span>
-                    </div>
-                    <Slider
-                      min={0}
-                      max={3}
-                      step={0.05}
-                      value={[externalConfig.micGain]}
-                      onValueChange={([v]) => updateExternalConfig({ micGain: v })}
-                      className={externalConfig.micMuted ? "opacity-40" : ""}
-                    />
-                  </div>
-                )}
-                {/* High-pass filter toggle */}
-                {externalConfig.captureMic && (
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="mic-highpass" className="text-xs text-muted-foreground">
-                      High-pass filter (80 Hz)
-                    </Label>
-                    <Switch
-                      id="mic-highpass"
-                      checked={externalConfig.micHighpass}
-                      onCheckedChange={(checked) =>
-                        updateExternalConfig({ micHighpass: checked })
-                      }
-                    />
-                  </div>
-                )}
-                {/* System Audio row */}
-                <div className="flex items-center justify-between">
-                  <Label
-                    htmlFor="system-audio"
-                    className={`flex items-center gap-2 ${
-                      !devices?.hasSystemAudio ? "opacity-50" : ""
-                    }`}
-                  >
-                    <Volume2 className="h-4 w-4" />
-                    System Audio
-                    {!devices?.hasSystemAudio && (
-                      <span className="text-xs text-muted-foreground">
-                        (not available)
-                      </span>
-                    )}
-                  </Label>
-                  <div className="flex items-center gap-2">
-                    {externalConfig.captureSystemAudio && !isExternalRecording && (
-                      <StereoMeter
-                        analyserL={systemAudioMonitor.analyserL}
-                        analyserR={systemAudioMonitor.analyserR}
-                        className="rounded"
-                      />
-                    )}
-                    <Switch
-                      id="system-audio"
-                      checked={externalConfig.captureSystemAudio}
-                      onCheckedChange={(checked) => {
-                        updateExternalConfig({ captureSystemAudio: checked });
-                        if (checked) loadAudioApps();
-                      }}
-                      disabled={!devices?.hasSystemAudio}
-                    />
-                  </div>
-                </div>
-                {/* Per-app system audio picker */}
-                {externalConfig.captureSystemAudio && audioApps.length > 0 && (
-                  <div className="space-y-1">
-                    <Select
-                      value={externalConfig.systemAudioApp ?? ALL_AUDIO_APPS}
-                      onValueChange={(value) =>
-                        updateExternalConfig({
-                          systemAudioApp:
-                            value === ALL_AUDIO_APPS ? undefined : value,
-                        })
-                      }
-                    >
-                      <SelectTrigger className="w-full h-8 text-xs">
-                        <SelectValue placeholder="Entire system (all apps)" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value={ALL_AUDIO_APPS}>
-                          Entire system (all apps)
-                        </SelectItem>
-                        {audioApps.map((app) => (
-                          <SelectItem key={app.bundleId} value={app.bundleId}>
-                            {app.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-                {/* System audio gain slider + mute */}
-                {externalConfig.captureSystemAudio && (
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1">
-                        <Label className="text-xs text-muted-foreground">System Audio Gain</Label>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-5 w-5 p-0"
-                          title={externalConfig.systemAudioMuted ? "Unmute system audio" : "Mute system audio"}
-                          onClick={() =>
-                            updateExternalConfig({ systemAudioMuted: !externalConfig.systemAudioMuted })
-                          }
-                        >
-                          {externalConfig.systemAudioMuted
-                            ? <VolumeX className="h-3 w-3 text-destructive" />
-                            : <Volume2 className="h-3 w-3" />}
-                        </Button>
-                      </div>
-                      <span className="text-xs text-muted-foreground tabular-nums">
-                        {externalConfig.systemAudioMuted
-                          ? "muted"
-                          : gainToDb(externalConfig.systemAudioGain)}
-                      </span>
-                    </div>
-                    <Slider
-                      min={0}
-                      max={3}
-                      step={0.05}
-                      value={[externalConfig.systemAudioGain]}
-                      onValueChange={([v]) => updateExternalConfig({ systemAudioGain: v })}
-                      className={externalConfig.systemAudioMuted ? "opacity-40" : ""}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Quality Settings */}
-            <div className="space-y-4">
-              <h4 className="text-sm font-medium">Quality</h4>
-              <div className="space-y-3 pl-6">
-                <div className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">
-                    Video Quality
-                  </Label>
-                  <Select
-                    value={externalConfig.videoQuality}
-                    onValueChange={(value: VideoQuality) =>
-                      updateExternalConfig({ videoQuality: value })
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="low">Low (2.5 Mbps)</SelectItem>
-                      <SelectItem value="medium">Medium (5 Mbps)</SelectItem>
-                      <SelectItem value="high">High (10 Mbps)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">
-                    Frame Rate
-                  </Label>
-                  <Select
-                    value={String(externalConfig.frameRate || 30)}
-                    onValueChange={(value) =>
-                      updateExternalConfig({ frameRate: parseInt(value) })
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="24">24 fps</SelectItem>
-                      <SelectItem value="30">30 fps</SelectItem>
-                      <SelectItem value="60">60 fps</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">
-                    Output Resolution (16:9)
-                  </Label>
-                  <Select
-                    value={externalConfig.outputResolution || "hd1080"}
-                    onValueChange={(value: OutputResolution) =>
-                      updateExternalConfig({ outputResolution: value })
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(OUTPUT_RESOLUTIONS).map(([key, { label }]) => (
-                        <SelectItem key={key} value={key}>
-                          {label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs text-muted-foreground">
-                    Layout
-                  </Label>
-                  <Select
-                    value={externalConfig.layout}
-                    onValueChange={(value: LayoutType) =>
-                      updateExternalConfig({ layout: value })
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(Object.entries(LAYOUT_LABELS) as [LayoutType, string][]).map(
-                        ([key, label]) => (
-                          <SelectItem key={key} value={key}>
-                            {label}
-                          </SelectItem>
-                        )
-                      )}
-                    </SelectContent>
-                  </Select>
-                  {externalConfig.layout === "pip" && (
-                    <div className="space-y-2 pt-1">
-                      <Label className="text-xs text-muted-foreground">
-                        PiP Corner
-                      </Label>
-                      <Select
-                        value={externalConfig.pipPosition}
-                        onValueChange={(value: PipPosition) =>
-                          updateExternalConfig({ pipPosition: value })
-                        }
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="top-left">Top Left</SelectItem>
-                          <SelectItem value="top-right">Top Right</SelectItem>
-                          <SelectItem value="bottom-left">Bottom Left</SelectItem>
-                          <SelectItem value="bottom-right">Bottom Right</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between pt-2 border-t">
-              <button
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                onClick={handleCheckUpdate}
-              >
-                Check for updates
-              </button>
-              {pendingUpdate && (
-                <span className="text-xs text-amber-500">
-                  v{pendingUpdate.version} available
-                </span>
+    <div className="h-[--toolbar-h] border-b border-separator bg-surface px-3 flex items-center gap-2 shrink-0">
+      {/* 1. Record / Stop hero button */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {/* span so the tooltip still fires on a disabled button */}
+          <span className="inline-flex">
+            <Button
+              variant="record"
+              size="default"
+              className="rounded-full gap-1.5 tabular-nums"
+              onClick={handleRecord}
+              disabled={!hasContent}
+              aria-label={
+                !hasContent
+                  ? "Add a source to start recording"
+                  : isRecording
+                  ? "Stop recording"
+                  : "Start recording"
+              }
+            >
+              {isRecording ? (
+                <>
+                  <Square className="h-3.5 w-3.5 fill-current shrink-0" />
+                  Stop
+                  <span className="tabular-nums">
+                    {formatDuration(status.durationMs)}
+                  </span>
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-white/80 animate-pulse shrink-0"
+                    aria-hidden="true"
+                  />
+                </>
+              ) : (
+                <>
+                  <Circle className="h-3.5 w-3.5 fill-current shrink-0" />
+                  Record
+                </>
               )}
-            </div>
+            </Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>
+          {!hasContent
+            ? "Add a source to start recording"
+            : isRecording
+            ? "Stop recording"
+            : "Start recording"}
+        </TooltipContent>
+      </Tooltip>
 
-            {!hasContent && (
-              <p className="text-sm text-destructive">
-                Add at least one source to a section before recording
-              </p>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* 2. Status chips + recording meters */}
+      <div className="flex items-center gap-1">
+        <AnimatePresence>
+          {activeSectionCount > 0 && (
+            <motion.div
+              key="sections-chip"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={spring.snappy}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex items-center gap-1 h-6 px-1.5 rounded-md bg-fill text-caption text-muted-foreground">
+                    <Video className="h-3 w-3" />
+                    <span>{activeSectionCount}</span>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {activeSectionCount} section
+                  {activeSectionCount !== 1 ? "s" : ""} active
+                </TooltipContent>
+              </Tooltip>
+            </motion.div>
+          )}
 
-      {/* Main Record Button */}
-      <Button
-        variant={status.isRecording || isExternalRecording ? "destructive" : "default"}
-        size="sm"
-        className="gap-2"
-        onClick={handleRecord}
-        disabled={!hasContent}
-      >
-        {status.isRecording || isExternalRecording ? (
-          <>
-            <Square className="h-4 w-4" />
-            Stop
-          </>
-        ) : (
-          <>
-            <Circle className="h-4 w-4 fill-current" />
-            Record
-          </>
+          {externalConfig.captureMic && (
+            <motion.div
+              key="mic-chip"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={spring.snappy}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex items-center h-6 px-1.5 rounded-md bg-fill text-caption text-muted-foreground">
+                    <Mic className="h-3 w-3" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>Microphone enabled</TooltipContent>
+              </Tooltip>
+            </motion.div>
+          )}
+
+          {externalConfig.captureSystemAudio && (
+            <motion.div
+              key="sys-chip"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              transition={spring.snappy}
+            >
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex items-center h-6 px-1.5 rounded-md bg-fill text-caption text-muted-foreground">
+                    <Volume2 className="h-3 w-3" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>System audio enabled</TooltipContent>
+              </Tooltip>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Per-source meters while recording */}
+        {isRecording && recordingAnalysers.mic && (
+          <StereoMeter
+            analyserL={recordingAnalysers.mic}
+            analyserR={recordingAnalysers.mic}
+            className="rounded"
+          />
         )}
-      </Button>
-
-      <Separator orientation="vertical" className="h-6" />
-
-      {/* Source Indicators */}
-      <div className="flex items-center gap-1 text-xs text-muted-foreground">
-        {/* Section count indicator */}
-        {activeSectionCount > 0 && (
-          <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
-            <Video className="h-3 w-3" />
-            <span>{activeSectionCount}</span>
-          </div>
-        )}
-        {externalConfig.captureMic && (
-          <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
-            <Mic className="h-3 w-3" />
-          </div>
-        )}
-        {externalConfig.captureSystemAudio && (
-          <div className="flex items-center gap-1 px-2 py-1 rounded bg-muted">
-            <Volume2 className="h-3 w-3" />
-          </div>
+        {isRecording && recordingAnalysers.sys && (
+          <StereoMeter
+            analyserL={recordingAnalysers.sys}
+            analyserR={recordingAnalysers.sys}
+            className="rounded"
+          />
         )}
       </div>
 
-      <Separator orientation="vertical" className="h-6" />
+      {/* 3. Flex spacer */}
+      <div className="flex-1" />
 
-      {/* Open recording file */}
-      <Button
-        variant="outline"
-        size="sm"
-        className="gap-2 bg-transparent"
-        onClick={handleOpenFile}
-        title="Open a saved recording for editing"
-      >
-        <FolderOpen className="h-4 w-4" />
-        Open
-      </Button>
+      {/* 4. File actions */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5"
+            onClick={handleOpenFile}
+            aria-label="Open recording file"
+          >
+            <FolderOpen className="h-4 w-4" />
+            <span className="hidden sm:inline">Open…</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Open a saved recording for editing</TooltipContent>
+      </Tooltip>
 
-      {/* Re-edit last recording (shown after a recording completes) */}
-      {lastBlob && !isExternalRecording && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-2 bg-transparent"
-          onClick={handleReEdit}
-          title="Reopen the last recording in the trim editor"
-        >
-          <RotateCcw className="h-4 w-4" />
-          Re-edit
-        </Button>
-      )}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5"
+            onClick={handleShowInFinder}
+            aria-label="Show recording in Finder"
+          >
+            <FolderSearch className="h-4 w-4" />
+            <span className="hidden sm:inline">Show in Finder</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Reveal saved file in Finder</TooltipContent>
+      </Tooltip>
 
-      {/* Export */}
-      <Button
-        variant="outline"
-        size="sm"
-        className="gap-2 bg-transparent"
-        onClick={handleExport}
-      >
-        <Download className="h-4 w-4" />
-        Export
-      </Button>
-
-      {/* Update available indicator */}
+      {/* 5. Update */}
       {pendingUpdate && !isApplyingUpdate && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-2 bg-transparent text-amber-500"
-          onClick={handleApplyUpdate}
-          disabled={status.isRecording || isExternalRecording}
-          title={`Update to v${pendingUpdate.version} — will relaunch`}
-        >
-          <Download className="h-4 w-4" />
-          Update
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-warning hover:text-warning"
+              onClick={onApplyUpdate}
+              disabled={isRecording}
+              aria-label={`Update to v${pendingUpdate.version}`}
+            >
+              <ArrowDownCircle className="h-4 w-4" />
+              <span className="hidden sm:inline">Update</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            Update to v{pendingUpdate.version} — will relaunch
+          </TooltipContent>
+        </Tooltip>
       )}
       {isApplyingUpdate && (
-        <span className="text-sm text-muted-foreground font-mono">
-          {Math.round(updateProgress * 100)}%…
+        <span className="text-caption text-muted-foreground tabular-nums">
+          {Math.round(updateProgress * 100)}%
         </span>
       )}
+
+      {/* 6. Inspector toggle */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className={inspectorOpen ? "bg-fill" : ""}
+            onClick={onToggleInspector}
+            aria-label="Show/Hide Inspector"
+            aria-pressed={inspectorOpen}
+          >
+            <PanelRight className="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+          {inspectorOpen ? "Hide Inspector" : "Show Inspector"} (⌥⌘I)
+        </TooltipContent>
+      </Tooltip>
 
       {/* Hidden file input for opening saved recordings */}
       <input
@@ -733,40 +363,6 @@ export function Toolbar() {
         className="hidden"
         onChange={handleFileChange}
       />
-
-      <div className="flex-1" />
-
-      {/* Recording Indicator + live per-source level meters */}
-      {(status.isRecording || isExternalRecording) && (
-        <div className="flex items-center gap-2 text-destructive">
-          <Circle className="h-3 w-3 fill-current animate-pulse" />
-          <span className="text-sm font-medium">Recording</span>
-          <span className="text-sm font-mono">
-            {formatDuration(status.durationMs)}
-          </span>
-          {recordingAnalysers.mic && (
-            <StereoMeter
-              analyserL={recordingAnalysers.mic}
-              analyserR={recordingAnalysers.mic}
-              className="rounded"
-            />
-          )}
-          {recordingAnalysers.sys && (
-            <StereoMeter
-              analyserL={recordingAnalysers.sys}
-              analyserR={recordingAnalysers.sys}
-              className="rounded"
-            />
-          )}
-        </div>
-      )}
-
-      {/* Timeline Position */}
-      {!status.isRecording && !isExternalRecording && (
-        <div className="text-sm text-muted-foreground font-mono">
-          {formatDuration(status.durationMs)} / {formatDuration(status.durationMs)}
-        </div>
-      )}
     </div>
   );
 }

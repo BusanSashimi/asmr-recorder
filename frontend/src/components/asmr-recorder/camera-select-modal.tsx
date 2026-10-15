@@ -5,12 +5,12 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Camera, Check, Loader2 } from "lucide-react";
 import { useRecordingContext } from "@/contexts/recording-context";
-import { hasMediaApi } from "@/lib/utils";
+import { cn, hasMediaApi } from "@/lib/utils";
 
 interface CameraSelectModalProps {
   open: boolean;
@@ -69,7 +69,7 @@ export function CameraSelectModal({
           audio: false,
         });
         setPreviewStream(stream);
-        
+
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
@@ -106,7 +106,7 @@ export function CameraSelectModal({
     if (selectedDeviceId && previewStream) {
       const device = cameras.find(d => d.deviceId === selectedDeviceId);
       const deviceName = device?.label || `Camera ${cameras.findIndex(d => d.deviceId === selectedDeviceId) + 1}`;
-      
+
       // Don't stop the stream - pass it to the parent
       onSelectCamera(selectedDeviceId, deviceName, previewStream);
       setPreviewStream(null); // Clear local reference without stopping
@@ -129,84 +129,88 @@ export function CameraSelectModal({
       if (!isOpen) handleCancel();
       else onOpenChange(isOpen);
     }}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-w-[480px]">
         <DialogHeader>
-          <DialogTitle>Select Camera for Section {sectionIndex + 1}</DialogTitle>
+          <DialogTitle>Select Camera</DialogTitle>
           <DialogDescription>
-            Choose a camera input to record in this section
+            Choose a camera for Section {sectionIndex + 1}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-4">
-          {/* Camera Preview */}
-          <Card className="aspect-video bg-black/90 overflow-hidden relative">
-            {isLoading && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <Loader2 className="h-8 w-8 text-white animate-spin" />
+        {/* Camera Preview */}
+        <div className="aspect-video bg-stage rounded-lg overflow-hidden relative">
+          {isLoading && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Loader2 className="h-8 w-8 text-white/60 animate-spin" />
+            </div>
+          )}
+          {error && (
+            <div className="absolute inset-0 flex items-center justify-center text-destructive text-caption p-4 text-center">
+              {error}
+            </div>
+          )}
+          {!selectedDeviceId && !isLoading && !error && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center text-white/50">
+                <Camera className="h-10 w-10 mx-auto mb-2" />
+                <p className="text-callout">Select a camera to preview</p>
               </div>
-            )}
-            {error && (
-              <div className="absolute inset-0 flex items-center justify-center text-destructive text-sm p-4 text-center">
-                {error}
-              </div>
-            )}
-            {!selectedDeviceId && !isLoading && !error && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="text-center text-white/60">
-                  <Camera className="h-12 w-12 mx-auto mb-2" />
-                  <p className="text-sm">Select a camera to preview</p>
-                </div>
-              </div>
-            )}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className={`w-full h-full object-cover ${!previewStream ? "hidden" : ""}`}
-            />
-          </Card>
-
-          {/* Camera List */}
-          <div className="space-y-2">
-            <p className="text-sm font-medium">Available Cameras</p>
-            {cameras.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No cameras found. Please connect a camera and try again.</p>
-            ) : (
-              <div className="grid gap-2 max-h-48 overflow-y-auto">
-                {cameras.map((device, index) => (
-                  <Button
-                    key={device.deviceId}
-                    variant={selectedDeviceId === device.deviceId ? "default" : "outline"}
-                    className="w-full justify-start gap-2 h-auto py-3"
-                    onClick={() => setSelectedDeviceId(device.deviceId)}
-                  >
-                    <Camera className="h-4 w-4 shrink-0" />
-                    <span className="truncate flex-1 text-left">
-                      {device.label || `Camera ${index + 1}`}
-                    </span>
-                    {selectedDeviceId === device.deviceId && (
-                      <Check className="h-4 w-4 shrink-0" />
-                    )}
-                  </Button>
-                ))}
-              </div>
-            )}
-          </div>
+            </div>
+          )}
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={cn("w-full h-full object-cover", !previewStream && "hidden")}
+          />
         </div>
 
-        {/* Actions */}
-        <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={handleCancel}>
+        {/* Camera List */}
+        <div className="flex flex-col gap-1">
+          <p className="text-headline text-foreground">Available Cameras</p>
+          {cameras.length === 0 ? (
+            <p className="text-callout text-muted-foreground">
+              No cameras found. Please connect a camera and try again.
+            </p>
+          ) : (
+            <div className="flex flex-col max-h-48 overflow-y-auto">
+              {cameras.map((device, index) => (
+                <button
+                  key={device.deviceId}
+                  className={cn(
+                    "flex items-center gap-2 h-8 rounded-md px-2 text-body transition-colors text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+                    selectedDeviceId === device.deviceId
+                      ? "bg-accent text-accent-foreground"
+                      : "hover:bg-fill"
+                  )}
+                  onClick={() => setSelectedDeviceId(device.deviceId)}
+                >
+                  <Camera className="h-4 w-4 shrink-0" />
+                  <span className="truncate flex-1">
+                    {device.label || `Camera ${index + 1}`}
+                  </span>
+                  {selectedDeviceId === device.deviceId && (
+                    <Check className="h-4 w-4 shrink-0" />
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="default" onClick={handleCancel}>
             Cancel
           </Button>
-          <Button 
-            onClick={handleConfirm} 
+          <Button
+            variant="accent"
+            onClick={handleConfirm}
             disabled={!selectedDeviceId || !previewStream || isLoading}
           >
-            Use This Camera
+            Use Camera
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Film, Pencil } from "lucide-react";
+import { Separator } from "@/components/ui/separator";
+import { Film } from "lucide-react";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { StereoMeter, Spectrum } from "./audio-monitor-graphics";
 
@@ -19,12 +20,11 @@ interface Clip {
 }
 
 /**
- * Read-only view of the current recording plus live input meters.
+ * Monitor strip: live input meters + clip chip for the most recent recording.
  *
- * This is intentionally NOT a multi-track editor: a recording is a single
- * composited MP4, and real playback/scrubbing/trimming lives in the TrimEditor.
- * The timeline shows the recorded clip (name + duration) and hands editing off
- * to that editor; during setup/recording it shows the live audio meters.
+ * Keeps all event wiring from the original Timeline: listens for
+ * recordingReadyForEdit to populate the clip, and the clip chip dispatches the
+ * same event to re-open the TrimEditor.
  */
 export function Timeline() {
   const { audioMonitor } = useRecordingContext();
@@ -64,78 +64,40 @@ export function Timeline() {
   };
 
   return (
-    <div className="h-full flex flex-col bg-card">
-      {/* Header */}
-      <div className="h-12 border-b border-border px-4 flex items-center gap-3">
-        <div className="text-sm font-medium">Timeline</div>
-        <div className="flex-1" />
-        {clip && (
-          <>
-            {clip.durationSec != null && (
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {formatDuration(clip.durationSec)}
-              </span>
-            )}
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-2 bg-transparent"
-              onClick={openInEditor}
-            >
-              <Pencil className="h-4 w-4" />
-              Open in editor
-            </Button>
-          </>
-        )}
+    <div className="h-full px-3 flex items-center gap-3 bg-surface border-t">
+      <span className="text-caption text-muted-foreground shrink-0">Input</span>
+      <StereoMeter
+        analyserL={audioMonitor.analyserL}
+        analyserR={audioMonitor.analyserR}
+      />
+      <div className="relative flex-1 min-w-0 h-8 rounded-md bg-fill/60 overflow-hidden">
+        <Spectrum
+          analyser={audioMonitor.analyserMix}
+          className="absolute inset-0 w-full h-full"
+        />
       </div>
-
-      {/* Content */}
-      <div className="flex-1 min-h-0 p-4 flex flex-col gap-4 overflow-auto">
-        {/* Live input meters (real — useful while monitoring/recording) */}
-        <div className="flex items-center gap-3">
-          <span className="w-20 flex-shrink-0 text-xs text-muted-foreground">
-            Live audio
-          </span>
-          <StereoMeter
-            analyserL={audioMonitor.analyserL}
-            analyserR={audioMonitor.analyserR}
-            className="flex-shrink-0 rounded-sm"
-          />
-          <div className="relative h-10 flex-1 overflow-hidden rounded border border-border bg-background">
-            <Spectrum
-              analyser={audioMonitor.analyserMix}
-              className="absolute inset-0 block h-full w-full opacity-90 pointer-events-none"
-            />
-          </div>
-        </div>
-
-        {/* Recorded clip (read-only) — opens the editor on click */}
-        {clip ? (
-          <button
-            type="button"
-            onClick={openInEditor}
-            title="Open this recording in the trim editor"
-            className="group flex w-full items-center gap-3 rounded-md border border-blue-600 bg-blue-500/80 px-3 py-2 text-left transition-colors hover:bg-blue-500/90"
-          >
-            <Film className="h-5 w-5 flex-shrink-0 text-white" />
-            <span className="flex-1 truncate text-sm font-medium text-white">
-              {clip.name}
+      <Separator orientation="vertical" className="h-6 shrink-0" />
+      {clip ? (
+        <Button
+          variant="secondary"
+          size="lg"
+          className="px-2.5 gap-2 shrink-0"
+          onClick={openInEditor}
+        >
+          <Film className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="max-w-[220px] truncate">{clip.name}</span>
+          {clip.durationSec != null && (
+            <span className="tabular-nums text-muted-foreground">
+              {formatDuration(clip.durationSec)}
             </span>
-            {clip.durationSec != null && (
-              <span className="text-xs tabular-nums text-white/90">
-                {formatDuration(clip.durationSec)}
-              </span>
-            )}
-            <span className="text-xs text-white/80 opacity-0 transition-opacity group-hover:opacity-100">
-              Open in editor →
-            </span>
-          </button>
-        ) : (
-          <div className="flex flex-1 items-center justify-center rounded-md border border-dashed border-border text-sm text-muted-foreground">
-            Record or open a clip to see it here.
-          </div>
-        )}
-      </div>
+          )}
+          <span className="text-foreground font-medium">Edit</span>
+        </Button>
+      ) : (
+        <span className="text-caption text-tertiary-foreground shrink-0">
+          No recording yet
+        </span>
+      )}
     </div>
   );
 }

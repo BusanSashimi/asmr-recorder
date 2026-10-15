@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
   Volume2,
@@ -8,7 +7,6 @@ import {
   Monitor,
   Camera,
   X,
-  Circle,
   Crop,
 } from "lucide-react";
 import { RecordModal } from "./record-modal";
@@ -21,6 +19,11 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "@/components/ui/tooltip";
 import { RecordingCanvas } from "./recording-canvas";
 import { useRecordingContext } from "@/contexts/recording-context";
 import { toast } from "@/hooks/use-toast";
@@ -596,26 +599,22 @@ export function Preview({ isRecording = false }: PreviewProps) {
     const isNativeScreen = !!nativeScreenChannels.current[index];
 
     if (section.source === null) {
-      // Empty section - show add button
+      // Empty section — dashed slot with add prompt
       return (
         <button
           onClick={() => handleSectionClick(index)}
-          className="w-full h-full flex flex-col items-center justify-center bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/30 rounded-lg transition-all duration-200 group"
+          className="w-full h-full flex flex-col items-center justify-center border border-dashed border-white/15 rounded-lg hover:bg-white/[.04] motion-safe:active:scale-[0.98] transition-[transform,background-color] duration-100 ease-out"
         >
-          <div className="w-12 h-12 rounded-full bg-white/10 group-hover:bg-white/20 flex items-center justify-center mb-2 transition-colors">
-            <Plus className="h-6 w-6 text-white/60 group-hover:text-white/80" />
+          <div className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center mb-2">
+            <Plus className="h-5 w-5 text-white/60" />
           </div>
-          <span className="text-white/60 group-hover:text-white/80 text-sm font-medium">
-            Section {index + 1}
-          </span>
-          <span className="text-white/40 text-xs mt-1">
-            Click to add source
-          </span>
+          <span className="text-body text-white/80">Add Source</span>
+          <span className="text-caption text-white/45 mt-0.5">Section {index + 1}</span>
         </button>
       );
     }
 
-    // Section has content - show video feed or canvas (for cropped screen)
+    // Section has content — show video feed or canvas (for cropped screen)
     return (
       <div className="relative w-full h-full rounded-lg overflow-hidden group">
         {/* Native screen capture canvas (WKWebView path, fed by JPEG frames) */}
@@ -651,85 +650,74 @@ export function Preview({ isRecording = false }: PreviewProps) {
           />
         )}
 
-        {/* Recording indicator overlay */}
-        {isRecording && (
-          <div className="absolute top-2 left-2 flex items-center gap-1.5 bg-black/60 rounded-full px-2 py-1">
-            <Circle className="h-2 w-2 fill-red-500 text-red-500 animate-pulse" />
-            <span className="text-white text-xs font-medium">REC</span>
-          </div>
-        )}
-
-        {/* Source indicator with region icon */}
-        <div className="absolute bottom-2 left-2 flex items-center gap-1.5 bg-black/60 rounded-full px-2 py-1">
+        {/* Source badge — bottom-left */}
+        <div className="absolute bottom-2 left-2 mat-hud rounded-full h-6 px-2 text-caption flex items-center gap-1.5">
           {section.source === "screen" ? (
             hasRegion ? (
-              <Crop className="h-3 w-3 text-red-400" />
+              <Crop className="h-3 w-3" />
             ) : (
-              <Monitor className="h-3 w-3 text-white" />
+              <Monitor className="h-3 w-3" />
             )
           ) : (
-            <Camera className="h-3 w-3 text-white" />
+            <Camera className="h-3 w-3" />
           )}
-          <span className="text-white text-xs truncate max-w-[100px]">
+          <span className="truncate max-w-[100px]">
             {section.deviceName ||
               (section.source === "screen" ? "Screen" : "Camera")}
           </span>
         </div>
 
-        {/* Region indicator badge */}
+        {/* Region size badge — top-right */}
         {hasRegion && sectionRegions.current[index] && (
-          <div className="absolute top-2 right-2 flex items-center gap-1 bg-red-500/80 rounded px-1.5 py-0.5">
-            <span className="text-white text-[10px] font-mono">
-              {sectionRegions.current[index]!.width}×
-              {sectionRegions.current[index]!.height}
-            </span>
+          <div className="absolute top-2 right-2 mat-hud rounded-sm text-micro uppercase font-mono px-1.5 py-0.5">
+            {sectionRegions.current[index]!.width}×
+            {sectionRegions.current[index]!.height}
           </div>
         )}
 
-        {/* Hover controls */}
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+        {/* Hover controls veil */}
+        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
           <Button
+            variant="hud"
             size="sm"
-            variant="secondary"
-            className="bg-black/70 hover:bg-black/90 text-white"
             onClick={() => handleSectionClick(index)}
           >
             Change
           </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            className="bg-red-500/70 hover:bg-red-500/90"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleClearSection(index);
-            }}
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="hud"
+                size="icon-sm"
+                aria-label="Remove source"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleClearSection(index);
+                }}
+              >
+                <X />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Remove source</TooltipContent>
+          </Tooltip>
         </div>
 
-        {/* Red border when recording this section */}
+        {/* Recording inset ring */}
         {isRecording && (
-          <div className="absolute inset-0 border-2 border-red-500 rounded-lg pointer-events-none" />
+          <div className="absolute inset-0 rounded-lg pointer-events-none ring-2 ring-inset ring-record/80" />
         )}
       </div>
     );
   };
 
   return (
-    <div className="flex-1 p-4 bg-muted/20 flex items-center justify-center">
-      {/* 16:9 aspect ratio container */}
-      <div
-        className="w-full max-w-full"
-        style={{ maxHeight: "calc(100% - 1rem)" }}
-      >
-        <Card
-          className="relative bg-black/90 overflow-hidden mx-auto"
+    <div className="flex-1 min-h-0 min-w-0 flex items-center justify-center p-4 [container-type:size]">
+        {/* Stage card — 16:9, always fits within its flex parent */}
+        <div
+          className="relative bg-stage rounded-xl overflow-hidden shadow-[0_1px_2px_hsl(0_0%_0%/.2),0_8px_24px_-8px_hsl(0_0%_0%/.3)] ring-1 ring-black/5"
           style={{
+            width: "min(100cqw, calc(100cqh * 16 / 9))",
             aspectRatio: "16 / 9",
-            maxWidth: "100%",
-            maxHeight: "100%",
           }}
         >
           {/* Layout slots — geometry driven by computeSlots so preview matches recording exactly */}
@@ -754,132 +742,116 @@ export function Preview({ isRecording = false }: PreviewProps) {
             </div>
           ))}
 
-        {/* Recording overlay - shows when recording is active */}
-        {isRecording && (
-          <div className="absolute top-4 right-4 flex flex-col items-end gap-2 z-10">
-            <div className="flex items-center gap-2 bg-red-500/90 rounded-full px-3 py-1.5">
-              <Circle className="h-3 w-3 fill-white text-white animate-pulse" />
-              <span className="text-white text-sm font-medium">Recording</span>
+          {/* Bottom HUD capsule — mute + status */}
+          {hasContent && (
+            <div className="absolute bottom-3 right-3 mat-hud rounded-full h-7 px-1 flex items-center gap-1.5 z-10">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="hud"
+                    size="icon-sm"
+                    aria-label={isMuted ? "Unmute preview" : "Mute preview"}
+                    onClick={toggleMute}
+                  >
+                    {isMuted ? <VolumeX /> : <Volume2 />}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {isMuted ? "Unmute preview" : "Mute preview"}
+                </TooltipContent>
+              </Tooltip>
+              <span className="text-caption pr-1 whitespace-nowrap">
+                {isRecording
+                  ? "Recording · Preview is reduced while recording"
+                  : "Ready"}
+              </span>
             </div>
-            <div className="bg-black/80 rounded px-2 py-1 text-xs text-white/80">
-              Low res preview recording (performance limitation)
+          )}
+        </div>
+
+        {/* Record Modal — Screen/Camera selection */}
+        <RecordModal
+          open={showRecordModal}
+          onOpenChange={setShowRecordModal}
+          onSelectOption={handleRecordOption}
+          sectionIndex={selectedSection}
+          hasExistingSource={
+            sectionState.sections[selectedSection]?.source !== null
+          }
+          onClear={() => handleClearSection(selectedSection)}
+        />
+
+        {/* Camera Selection Modal */}
+        <CameraSelectModal
+          open={showCameraModal}
+          onOpenChange={setShowCameraModal}
+          onSelectCamera={handleCameraSelect}
+          sectionIndex={selectedSection}
+        />
+
+        {/* Display picker — shown when >1 display is available (native path only) */}
+        <Dialog
+          open={showDisplayPicker}
+          onOpenChange={(open) => { if (!open) handleDisplayPickerClose(); }}
+        >
+          <DialogContent className="max-w-[320px]">
+            <DialogHeader>
+              <DialogTitle>Select Display</DialogTitle>
+              <DialogDescription>Choose which display to capture.</DialogDescription>
+            </DialogHeader>
+            <div className="flex flex-col gap-0.5">
+              {availableDisplays.map((display, i) => (
+                <button
+                  key={display.displayId}
+                  className="flex items-center h-8 rounded-md px-2 text-body hover:bg-fill transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+                  onClick={() => handleDisplayConfirm(i)}
+                >
+                  <span className="flex-1 text-left">
+                    {display.isPrimary ? "Primary Display" : `Display ${i + 1}`}
+                  </span>
+                  <span className="text-caption tabular-nums text-muted-foreground">
+                    {display.width}×{display.height}
+                  </span>
+                </button>
+              ))}
             </div>
-          </div>
-        )}
+          </DialogContent>
+        </Dialog>
 
-          {/* Controls overlay */}
-          <div className="absolute bottom-4 left-4 right-4 flex items-center gap-3 z-10">
-            <div className="flex-1 h-1 bg-white/20 rounded-full">
-              <div
-                className={`h-full bg-white rounded-full transition-all ${
-                  isRecording ? "w-full animate-pulse" : "w-0"
-                }`}
-              />
-            </div>
+        {/* Region Selector Overlay */}
+        <RegionSelector
+          open={showRegionSelector}
+          onClose={handleRegionCancel}
+          onConfirm={handleRegionConfirm}
+          screenWidth={screenDimensions.width}
+          screenHeight={screenDimensions.height}
+          stream={pendingStream}
+        />
 
-            <Button
-              size="sm"
-              variant="secondary"
-              className="bg-black/50 hover:bg-black/70 text-white border-white/20"
-              onClick={toggleMute}
-              disabled={!hasContent}
-            >
-              {isMuted ? (
-                <VolumeX className="h-4 w-4" />
-              ) : (
-                <Volume2 className="h-4 w-4" />
-              )}
-            </Button>
-
-            <span className="text-white text-sm font-mono">
-              {isRecording ? "Recording" : hasContent ? "Ready" : "No Sources"}
-            </span>
-          </div>
-        </Card>
+        {/* Recording Canvas — composites sections and sends frames to Tauri */}
+        <RecordingCanvas
+          outputWidth={externalConfig.outputWidth}
+          outputHeight={externalConfig.outputHeight}
+          frameRate={externalConfig.frameRate || 30}
+          isRecording={isExternalRecording}
+          onFrameError={handleFrameError}
+          sectionSources={sectionSources}
+          getSectionSources={getSectionSources}
+          captureMic={externalConfig.captureMic}
+          micDeviceId={externalConfig.micDeviceId}
+          captureSystemAudio={externalConfig.captureSystemAudio}
+          systemAudioApp={externalConfig.systemAudioApp}
+          micGain={externalConfig.micGain}
+          micHighpass={externalConfig.micHighpass}
+          micMuted={externalConfig.micMuted}
+          systemAudioGain={externalConfig.systemAudioGain}
+          systemAudioMuted={externalConfig.systemAudioMuted}
+          layout={externalConfig.layout}
+          pipPosition={externalConfig.pipPosition}
+          pipSize={externalConfig.pipSize}
+          videoQuality={externalConfig.videoQuality}
+          onAnalysersChanged={setRecordingAnalysers}
+        />
       </div>
-
-      {/* Record Modal - Screen/Camera selection */}
-      <RecordModal
-        open={showRecordModal}
-        onOpenChange={setShowRecordModal}
-        onSelectOption={handleRecordOption}
-        sectionIndex={selectedSection}
-        hasExistingSource={
-          sectionState.sections[selectedSection]?.source !== null
-        }
-        onClear={() => handleClearSection(selectedSection)}
-      />
-
-      {/* Camera Selection Modal */}
-      <CameraSelectModal
-        open={showCameraModal}
-        onOpenChange={setShowCameraModal}
-        onSelectCamera={handleCameraSelect}
-        sectionIndex={selectedSection}
-      />
-
-      {/* Display picker — shown when >1 display is available (native path only) */}
-      <Dialog
-        open={showDisplayPicker}
-        onOpenChange={(open) => { if (!open) handleDisplayPickerClose(); }}
-      >
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Select display</DialogTitle>
-            <DialogDescription>Choose which display to capture.</DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-2">
-            {availableDisplays.map((display, i) => (
-              <Button
-                key={display.displayId}
-                variant="outline"
-                className="justify-start"
-                onClick={() => handleDisplayConfirm(i)}
-              >
-                {display.isPrimary ? "Primary display" : `Display ${i + 1}`}
-                <span className="ml-auto text-xs text-muted-foreground">
-                  {display.width}×{display.height}
-                </span>
-              </Button>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Region Selector Overlay */}
-      <RegionSelector
-        open={showRegionSelector}
-        onClose={handleRegionCancel}
-        onConfirm={handleRegionConfirm}
-        screenWidth={screenDimensions.width}
-        screenHeight={screenDimensions.height}
-        stream={pendingStream}
-      />
-
-      {/* Recording Canvas - composites sections and sends frames to Tauri */}
-      <RecordingCanvas
-        outputWidth={externalConfig.outputWidth}
-        outputHeight={externalConfig.outputHeight}
-        frameRate={externalConfig.frameRate || 30}
-        isRecording={isExternalRecording}
-        onFrameError={handleFrameError}
-        sectionSources={sectionSources}
-        getSectionSources={getSectionSources}
-        captureMic={externalConfig.captureMic}
-        micDeviceId={externalConfig.micDeviceId}
-        captureSystemAudio={externalConfig.captureSystemAudio}
-        systemAudioApp={externalConfig.systemAudioApp}
-        micGain={externalConfig.micGain}
-        micHighpass={externalConfig.micHighpass}
-        micMuted={externalConfig.micMuted}
-        systemAudioGain={externalConfig.systemAudioGain}
-        systemAudioMuted={externalConfig.systemAudioMuted}
-        layout={externalConfig.layout}
-        pipPosition={externalConfig.pipPosition}
-        pipSize={externalConfig.pipSize}
-        videoQuality={externalConfig.videoQuality}
-        onAnalysersChanged={setRecordingAnalysers}
-      />
-    </div>
   );
 }
