@@ -7,7 +7,7 @@ Platform: Tauri v2 on macOS 14+ (WKWebView ≈ Safari 17). Default window 800×6
 
 | Principle (§16) | What it means here |
 | --- | --- |
-| Purpose | The job is *add sources → set audio → record → trim → find the file*. Every control serves one of those steps. |
+| Purpose | The job is *add sources → set audio → record → edit → export*. Every control serves one of those steps. |
 | Familiarity | Look and behave like a first-party Mac app: system font, system colors, unified toolbar, right-hand **Inspector**, sheets for focused tasks. |
 | Simplicity | One indicator per state (no duplicated REC pills/timers/buttons). The common path is visible; nothing important hides in a modal. |
 | Agency | Inspector can be hidden; settings lock (visibly) only while recording, exactly as before. |
@@ -221,3 +221,16 @@ Centered `max-w-md` card: `AlertTriangle` in `text-warning`, `text-title` "Somet
 - Don't animate layout properties of the stage card or anything inside `recording-canvas.tsx`.
 - Don't add bounce to anything a click triggers.
 - Don't put translucent material on fixed chrome that has nothing beneath it.
+
+
+## Editing Mode
+
+The shared 40 px mode bar uses the existing segmented control for **Recording Mode** and **Editing Mode**. Capture/finalization and timeline voice-over lock mode switching. Editing uses the same typography, semantic colors, focus rings and 28 px controls as recording; no independent editor theme or palette is introduced.
+
+A 44 px editor toolbar holds project actions, workspace selection, panel arrangement, Quick Trim and Export. Docked panel tab headers are 32 px. At 800×600, Media and Inspector share a tab group; the Program/Source monitors share another, with the timeline below. Resizable panels scroll internally. Assembly, Editing, Color, Effects and Audio presets offer focused layouts. Panels can be opened, moved and restored with toolbar menus as well as dragging.
+
+The dark media stage is content chrome, including in light appearance. Blue marks selected clips, focus, active tools and the playhead. Green depicts audio waveforms/meters. Effect color samples, media colors and scope pixels represent actual content and are exempt from structural chrome tokens. Red remains reserved for recording and destructive/error states.
+
+Parameter inspectors use labeled fields and collapsible groups; complex controls have keyboard alternatives (numeric vertices/handles, keyframe nudges, panel placement menus). All Actions provides searchable advanced forms, with unavailable operations disabled and an explanation. Long paths are exposed in tooltips while compact rows display basenames. Empty panels explain which selection or media is needed.
+
+Implementation and validation: [FilmCraft migration](filmcraft-migration.md).

@@ -28,6 +28,7 @@ export function SegmentedControl<T extends string>({
   className,
 }: SegmentedControlProps<T>) {
   const groupRef = React.useRef<HTMLDivElement>(null)
+  const highlightId = React.useId()
 
   function handleKeyDown(e: React.KeyboardEvent, index: number) {
     if (disabled) return
@@ -77,7 +78,7 @@ export function SegmentedControl<T extends string>({
           >
             {isSelected && (
               <motion.span
-                layoutId="segmented-highlight"
+                layoutId={`segmented-highlight-${highlightId}`}
                 className="absolute inset-0 rounded-[5px] bg-elevated shadow-[0_1px_2px_hsl(0_0%_0%/.12),0_0_0_0.5px_hsl(0_0%_0%/.06)]"
                 transition={spring.snappy}
                 style={{ zIndex: -1 }}

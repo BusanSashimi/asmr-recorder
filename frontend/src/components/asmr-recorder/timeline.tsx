@@ -26,8 +26,8 @@ interface Clip {
  * recordingReadyForEdit to populate the clip, and the clip chip dispatches the
  * same event to re-open the TrimEditor.
  */
-export function Timeline() {
-  const { audioMonitor } = useRecordingContext();
+export function Timeline({onOpenEditor}:{onOpenEditor?:()=>void}) {
+  const { audioMonitor,status } = useRecordingContext();
   const [clip, setClip] = useState<Clip | null>(null);
 
   // Populate from the most recent finished/opened recording (same event the
@@ -77,7 +77,7 @@ export function Timeline() {
         />
       </div>
       <Separator orientation="vertical" className="h-6 shrink-0" />
-      {clip ? (
+      {status.outputPath&&onOpenEditor ? <Button variant="secondary" size="lg" className="px-2.5 gap-2 shrink-0" onClick={onOpenEditor}><Film className="h-4 w-4"/><span className="max-w-[180px] truncate">{status.outputPath.split(/[/\\]/).pop()}</span><span>Edit</span></Button> : clip ? (
         <Button
           variant="secondary"
           size="lg"

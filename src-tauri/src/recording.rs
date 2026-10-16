@@ -15,7 +15,7 @@ pub struct AudioApp {
 /// Return every running app that SCK can enumerate, sorted by name and deduped
 /// by bundle ID. Used to populate the per-app system-audio picker. Returns an
 /// empty list on non-macOS platforms.
-#[command]
+#[command(async)]
 pub fn list_audio_apps() -> Result<Vec<AudioApp>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -60,7 +60,7 @@ pub struct DeviceList {
 }
 
 /// Tauri command: Get list of available capture devices
-#[command]
+#[command(async)]
 pub fn get_available_devices() -> Result<DeviceList, String> {
     let mut device_list = DeviceList::default();
 

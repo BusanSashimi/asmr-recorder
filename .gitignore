@@ -6,6 +6,7 @@ frontend/dist
 # Rust
 target/
 Cargo.lock
+!src-tauri/Cargo.lock
 
 # Tauri
 src-tauri/target/

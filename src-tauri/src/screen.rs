@@ -44,7 +44,7 @@ impl ScreenFrame {
                     // macOS ScreenCaptureKit uses BGRA format
                     rgba.push(self.data[offset + 2]); // R
                     rgba.push(self.data[offset + 1]); // G
-                    rgba.push(self.data[offset]);     // B
+                    rgba.push(self.data[offset]); // B
                     rgba.push(self.data[offset + 3]); // A
                 }
 
@@ -53,7 +53,7 @@ impl ScreenFrame {
                     // Windows/Linux use BGRA format
                     rgba.push(self.data[offset + 2]); // R
                     rgba.push(self.data[offset + 1]); // G
-                    rgba.push(self.data[offset]);     // B
+                    rgba.push(self.data[offset]); // B
                     rgba.push(self.data[offset + 3]); // A
                 }
             }
@@ -61,7 +61,6 @@ impl ScreenFrame {
 
         rgba
     }
-
 }
 
 /// Screen capture configuration
@@ -117,7 +116,7 @@ pub use screen_fallback::ScreenCapture;
 ///
 /// macOS: returns all displays via SCShareableContent. Other platforms return a
 /// single synthetic entry for the primary display.
-#[command]
+#[command(async)]
 pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -176,7 +175,7 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_screen_frame_conversion() {
         // Test with tightly-packed data (stride = width * 4)
@@ -187,13 +186,13 @@ mod tests {
             stride: 4, // 1 pixel * 4 bytes per pixel
             timestamp: Duration::from_secs(0),
         };
-        
+
         let rgba = frame.to_rgba();
         // Both macOS and other platforms use BGRA format now
         // Input BGRA [255, 128, 64, 255] -> Output RGBA [64, 128, 255, 255]
         assert_eq!(rgba, vec![64, 128, 255, 255]); // BGRA -> RGBA
     }
-    
+
     #[test]
     fn test_screen_frame_with_stride_padding() {
         // Test with padded data (stride > width * 4)
@@ -204,11 +203,11 @@ mod tests {
             // Row 1: 2 BGRA pixels + 8 bytes padding
             data: vec![
                 // Row 0
-                0, 255, 0, 255,     // Pixel (0,0): BGRA = green
-                255, 0, 0, 255,     // Pixel (1,0): BGRA = blue
+                0, 255, 0, 255, // Pixel (0,0): BGRA = green
+                255, 0, 0, 255, // Pixel (1,0): BGRA = blue
                 0, 0, 0, 0, 0, 0, 0, 0, // 8 bytes padding
                 // Row 1
-                0, 0, 255, 255,     // Pixel (0,1): BGRA = red
+                0, 0, 255, 255, // Pixel (0,1): BGRA = red
                 255, 255, 255, 255, // Pixel (1,1): BGRA = white
                 0, 0, 0, 0, 0, 0, 0, 0, // 8 bytes padding
             ],
@@ -217,7 +216,7 @@ mod tests {
             stride: 16, // 2 pixels * 4 bytes + 8 bytes padding = 16 bytes
             timestamp: Duration::from_secs(0),
         };
-        
+
         #[cfg(not(target_os = "macos"))]
         {
             let rgba = frame.to_rgba();

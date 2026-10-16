@@ -35,7 +35,7 @@ import {
   listDisplays,
   type DisplayInfo,
 } from "@/lib/native-screen";
-import type { Channel } from "@tauri-apps/api/core";
+import { isTauri, type Channel } from "@tauri-apps/api/core";
 import type { ScreenRegion } from "@/types/recording";
 
 interface PreviewProps {
@@ -202,10 +202,9 @@ export function Preview({ isRecording = false }: PreviewProps) {
 
   const handleRecordOption = async (option: "screen" | "camera") => {
     if (option === "screen") {
-      // Browser screen capture (getDisplayMedia) is unavailable in WKWebView, so
-      // use the native ScreenCaptureKit stream there; keep the browser path (with
-      // region selection) where getDisplayMedia actually exists.
-      if (hasMediaApi("getDisplayMedia")) {
+      // The desktop host owns screen permission and capture. WebKit can expose
+      // getDisplayMedia without allowing it in an embedded webview.
+      if (!isTauri() && hasMediaApi("getDisplayMedia")) {
         await startScreenCapture();
       } else {
         await startNativeScreen(selectedSection);

@@ -33,6 +33,7 @@ interface ToolbarProps {
   updateProgress: number;
   isApplyingUpdate: boolean;
   onApplyUpdate: () => void;
+  onOpenMedia?: () => void;
 }
 
 export function Toolbar({
@@ -42,6 +43,7 @@ export function Toolbar({
   updateProgress,
   isApplyingUpdate,
   onApplyUpdate,
+  onOpenMedia,
 }: ToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -53,6 +55,7 @@ export function Toolbar({
     isExternalRecording,
     startExternalRecording,
     stopExternalRecording,
+    isSaving,
   } = useRecordingContext();
 
   const isRecording = status.isRecording || isExternalRecording;
@@ -81,7 +84,7 @@ export function Toolbar({
     previousOutputPathRef.current = status.outputPath;
   }, [status.outputPath]);
 
-  const handleOpenFile = () => fileInputRef.current?.click();
+  const handleOpenFile = () => onOpenMedia ? onOpenMedia() : fileInputRef.current?.click();
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -152,7 +155,7 @@ export function Toolbar({
               size="default"
               className="rounded-full gap-1.5 tabular-nums"
               onClick={handleRecord}
-              disabled={!hasContent}
+              disabled={!hasContent || isSaving}
               aria-label={
                 !hasContent
                   ? "Add a source to start recording"
@@ -176,7 +179,7 @@ export function Toolbar({
               ) : (
                 <>
                   <Circle className="h-3.5 w-3.5 fill-current shrink-0" />
-                  Record
+                  {isSaving ? "Saving…" : "Record"}
                 </>
               )}
             </Button>

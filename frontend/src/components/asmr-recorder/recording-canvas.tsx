@@ -1,3 +1,5 @@
+import { recordingTimestampUs } from "@/lib/recording-clock";
+import { ENCODE_WORKLET_CODE } from "@/lib/encode-worklet";
 import {
   useEffect,
   useRef,
@@ -17,7 +19,12 @@ import {
   startNativeSystemAudioStream,
   stopNativeSystemAudioStream,
 } from "@/lib/native-system-audio";
-import type { ScreenRegion, PipPosition, LayoutType, VideoQuality } from "@/types/recording";
+import type {
+  ScreenRegion,
+  PipPosition,
+  LayoutType,
+  VideoQuality,
+} from "@/types/recording";
 import { VIDEO_QUALITY_BITRATES } from "@/types/recording";
 import { computeSlots } from "@/lib/layouts";
 import { encodeQueueLimit } from "@/lib/encoder-tuning";
@@ -75,7 +82,10 @@ interface RecordingCanvasProps {
   /** Video quality preset — controls encoder bitrate */
   videoQuality: VideoQuality;
   /** Called after acquireAudioTrack with the per-source AnalyserNodes (null on stop) */
-  onAnalysersChanged?: (mic: AnalyserNode | null, sys: AnalyserNode | null) => void;
+  onAnalysersChanged?: (
+    mic: AnalyserNode | null,
+    sys: AnalyserNode | null,
+  ) => void;
 }
 
 export interface RecordingCanvasRef {
@@ -110,18 +120,6 @@ const AAC_CODEC = "mp4a.40.2";
 // and posts per-channel Float32Arrays to the main thread for encoding. Registered
 // via Blob URL to avoid bundler/CSP issues (same approach as native-system-audio.ts).
 const ENCODE_WORKLET_NAME = "encode-source";
-const ENCODE_WORKLET_CODE = `
-class EncodeSourceProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const input = inputs[0];
-    if (input && input.length && input[0].length) {
-      this.port.postMessage(input.map((ch) => ch.slice()));
-    }
-    return true;
-  }
-}
-registerProcessor('encode-source', EncodeSourceProcessor);
-`;
 
 // Returns a centered source crop rect so the source fills the dest without
 // distortion (analogous to CSS object-fit:cover). Returns null when source
@@ -267,9 +265,10 @@ export const RecordingCanvas = forwardRef<
   const frameCountRef = useRef<number>(0);
   const lastFrameTimeRef = useRef<number>(0);
   const watchdogIntervalRef = useRef<number | null>(null);
-  const sectionSourcesRef = useRef<
-    [SectionSource, SectionSource, SectionSource, SectionSource]
-  >(sectionSources);
+  const sectionSourcesRef =
+    useRef<[SectionSource, SectionSource, SectionSource, SectionSource]>(
+      sectionSources,
+    );
   const getSectionSourcesRef = useRef(getSectionSources);
   const recordingWidthRef = useRef(recordingWidth);
   const recordingHeightRef = useRef(recordingHeight);
@@ -297,6 +296,10 @@ export const RecordingCanvas = forwardRef<
 
   // Audio recording refs
   const audioEncoderRef = useRef<AudioEncoder | null>(null);
+  const captureReadyRef = useRef(false);
+  const audioClockStartRef = useRef(0);
+  const lastVideoTimestampRef = useRef(-1);
+  const timingRef = useRef<Record<string, number | string>>({});
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioProcessingCleanupRef = useRef<(() => void) | null>(null);
@@ -348,8 +351,16 @@ export const RecordingCanvas = forwardRef<
     // Live-update gain nodes if recording is already active (smooth ramp, no clicks).
     // Mute overrides the gain slider: effective gain is 0 when muted, slider value otherwise.
     const t = audioContextRef.current?.currentTime ?? 0;
-    micGainNodeRef.current?.gain.setTargetAtTime(micMuted ? 0 : micGain, t, 0.02);
-    systemAudioGainNodeRef.current?.gain.setTargetAtTime(systemAudioMuted ? 0 : systemAudioGain, t, 0.02);
+    micGainNodeRef.current?.gain.setTargetAtTime(
+      micMuted ? 0 : micGain,
+      t,
+      0.02,
+    );
+    systemAudioGainNodeRef.current?.gain.setTargetAtTime(
+      systemAudioMuted ? 0 : systemAudioGain,
+      t,
+      0.02,
+    );
     // Toggle the high-pass filter by switching type — "allpass" passes everything unchanged.
     if (micHighpassNodeRef.current) {
       micHighpassNodeRef.current.type = micHighpass ? "highpass" : "allpass";
@@ -413,11 +424,36 @@ export const RecordingCanvas = forwardRef<
               // is occluded and adds a redundant copy).
               const { x, y, width, height } = source.region;
               if (fit === "cover") {
-                const crop = computeCoverCrop(width, height, destWidth, destHeight);
+                const crop = computeCoverCrop(
+                  width,
+                  height,
+                  destWidth,
+                  destHeight,
+                );
                 if (crop) {
-                  ctx.drawImage(video, x + crop.sx, y + crop.sy, crop.sw, crop.sh, destX, destY, destWidth, destHeight);
+                  ctx.drawImage(
+                    video,
+                    x + crop.sx,
+                    y + crop.sy,
+                    crop.sw,
+                    crop.sh,
+                    destX,
+                    destY,
+                    destWidth,
+                    destHeight,
+                  );
                 } else {
-                  ctx.drawImage(video, x, y, width, height, destX, destY, destWidth, destHeight);
+                  ctx.drawImage(
+                    video,
+                    x,
+                    y,
+                    width,
+                    height,
+                    destX,
+                    destY,
+                    destWidth,
+                    destHeight,
+                  );
                 }
               } else {
                 ctx.drawImage(
@@ -434,9 +470,24 @@ export const RecordingCanvas = forwardRef<
               }
             } else {
               if (fit === "cover") {
-                const crop = computeCoverCrop(video.videoWidth, video.videoHeight, destWidth, destHeight);
+                const crop = computeCoverCrop(
+                  video.videoWidth,
+                  video.videoHeight,
+                  destWidth,
+                  destHeight,
+                );
                 if (crop) {
-                  ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, destX, destY, destWidth, destHeight);
+                  ctx.drawImage(
+                    video,
+                    crop.sx,
+                    crop.sy,
+                    crop.sw,
+                    crop.sh,
+                    destX,
+                    destY,
+                    destWidth,
+                    destHeight,
+                  );
                 } else {
                   ctx.drawImage(video, destX, destY, destWidth, destHeight);
                 }
@@ -445,10 +496,7 @@ export const RecordingCanvas = forwardRef<
               }
             }
           } else {
-            if (
-              frameCountRef.current < 5 ||
-              frameCountRef.current % 50 === 0
-            ) {
+            if (frameCountRef.current < 5 || frameCountRef.current % 50 === 0) {
               console.warn(
                 `[RecordingCanvas] Video not ready at frame ${frameCountRef.current}: readyState=${video.readyState}, paused=${video.paused}, ended=${video.ended}, srcObject=${!!video.srcObject}`,
               );
@@ -460,9 +508,24 @@ export const RecordingCanvas = forwardRef<
           const canvas = source.element as HTMLCanvasElement;
           if (canvas.width > 0 && canvas.height > 0) {
             if (fit === "cover") {
-              const crop = computeCoverCrop(canvas.width, canvas.height, destWidth, destHeight);
+              const crop = computeCoverCrop(
+                canvas.width,
+                canvas.height,
+                destWidth,
+                destHeight,
+              );
               if (crop) {
-                ctx.drawImage(canvas, crop.sx, crop.sy, crop.sw, crop.sh, destX, destY, destWidth, destHeight);
+                ctx.drawImage(
+                  canvas,
+                  crop.sx,
+                  crop.sy,
+                  crop.sw,
+                  crop.sh,
+                  destX,
+                  destY,
+                  destWidth,
+                  destHeight,
+                );
               } else {
                 ctx.drawImage(canvas, destX, destY, destWidth, destHeight);
               }
@@ -581,24 +644,47 @@ export const RecordingCanvas = forwardRef<
   /**
    * Save recording data to the Tauri backend
    */
-  const saveRecording = useCallback(
-    async (data: ArrayBuffer) => {
-      try {
-        // Send bytes as the raw IPC body (Tauri v2) instead of base64, so long
-        // recordings don't hit the JS max-string-length limit.
-        const savedPath = await invoke<string>("save_media_recording", data);
+  const pendingSaveRef = useRef<ArrayBuffer | null>(null);
+  const savingRef = useRef(false);
+  const saveRecording = useCallback(async (data: ArrayBuffer) => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    window.dispatchEvent(new Event("recordingSaving"));
+    pendingSaveRef.current = data;
+    try {
+      // Send bytes as the raw IPC body (Tauri v2) instead of base64, so long
+      // recordings don't hit the JS max-string-length limit.
+      const savedPath = await invoke<string>("save_media_recording", data, {
+        headers: { "x-recording-timing": JSON.stringify(timingRef.current) },
+      });
 
-        console.log(`[Recording] Video saved: ${savedPath}`);
-        window.dispatchEvent(
-          new CustomEvent("recordingSaved", { detail: { path: savedPath } }),
-        );
-      } catch (error) {
-        console.error("[Recording] Error saving video:", error);
-        onFrameErrorRef.current?.(String(error));
-      }
-    },
-    [],
-  );
+      console.log(`[Recording] Video saved: ${savedPath}`);
+      window.dispatchEvent(
+        new CustomEvent("recordingSaved", { detail: { path: savedPath } }),
+      );
+      pendingSaveRef.current = null;
+      return savedPath;
+    } catch (error) {
+      console.error("[Recording] Error saving video:", error);
+      onFrameErrorRef.current?.(String(error));
+      window.dispatchEvent(
+        new CustomEvent("recordingSaveFailed", {
+          detail: { message: String(error), retryable: true },
+        }),
+      );
+      throw error;
+    } finally {
+      savingRef.current = false;
+    }
+  }, []);
+  useEffect(() => {
+    const retry = () => {
+      if (pendingSaveRef.current)
+        void saveRecording(pendingSaveRef.current).catch(() => {});
+    };
+    window.addEventListener("retryRecordingSave", retry);
+    return () => window.removeEventListener("retryRecordingSave", retry);
+  }, [saveRecording]);
 
   /**
    * Acquire a single mixed audio track from mic and/or system audio sources.
@@ -625,7 +711,9 @@ export const RecordingCanvas = forwardRef<
           // warn about anything the platform silently kept on.
           const micStream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              ...(micDeviceIdRef.current ? { deviceId: { exact: micDeviceIdRef.current } } : {}),
+              ...(micDeviceIdRef.current
+                ? { deviceId: { exact: micDeviceIdRef.current } }
+                : {}),
               echoCancellation: false,
               noiseSuppression: false,
               autoGainControl: false,
@@ -695,8 +783,11 @@ export const RecordingCanvas = forwardRef<
       const destination = audioContext.createMediaStreamDestination();
 
       // Mic stream is always first in audioStreams (added above before sysStream).
-      const micStream = wantMic ? audioStreams[0] ?? null : null;
-      const sysStream = !wantNativeSystemAudio && wantSystemAudio ? audioStreams[audioStreams.length - 1] ?? null : null;
+      const micStream = wantMic ? (audioStreams[0] ?? null) : null;
+      const sysStream =
+        !wantNativeSystemAudio && wantSystemAudio
+          ? (audioStreams[audioStreams.length - 1] ?? null)
+          : null;
 
       if (micStream) {
         const source = audioContext.createMediaStreamSource(micStream);
@@ -723,7 +814,9 @@ export const RecordingCanvas = forwardRef<
       if (sysStream) {
         const source = audioContext.createMediaStreamSource(sysStream);
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = systemAudioMutedRef.current ? 0 : systemAudioGainRef.current;
+        gainNode.gain.value = systemAudioMutedRef.current
+          ? 0
+          : systemAudioGainRef.current;
         source.connect(gainNode);
         gainNode.connect(destination);
         systemAudioGainNodeRef.current = gainNode;
@@ -736,7 +829,9 @@ export const RecordingCanvas = forwardRef<
 
       if (wantNativeSystemAudio) {
         const gainNode = audioContext.createGain();
-        gainNode.gain.value = systemAudioMutedRef.current ? 0 : systemAudioGainRef.current;
+        gainNode.gain.value = systemAudioMutedRef.current
+          ? 0
+          : systemAudioGainRef.current;
         gainNode.connect(destination);
         systemAudioGainNodeRef.current = gainNode;
         const sysAnalyser = audioContext.createAnalyser();
@@ -789,7 +884,7 @@ export const RecordingCanvas = forwardRef<
    * thread) and falls back to ScriptProcessorNode for WKWebView compatibility.
    */
   const startAudioProcessing = useCallback(
-    (audioTrack: MediaStreamTrack, audioEncoder: AudioEncoder) => {
+    async (audioTrack: MediaStreamTrack, audioEncoder: AudioEncoder) => {
       try {
         // Force stereo: encoder/muxer config uses AUDIO_NUM_CHANNELS.
         const channelCount = AUDIO_NUM_CHANNELS;
@@ -803,13 +898,12 @@ export const RecordingCanvas = forwardRef<
           new MediaStream([audioTrack]),
         );
 
-        let sampleOffset = 0;
-
         // Shared encoder-feeding helper. `channels` is one Float32Array per
         // channel (already copied — safe to read without aliasing concerns).
         // Uses audioCtx.sampleRate so both paths reference the same clamped rate.
-        const emit = (channels: Float32Array[]) => {
-          if (audioEncoder.state !== "configured") return;
+        const emit = (channels: Float32Array[], contextTime: number) => {
+          if (!captureReadyRef.current || audioEncoder.state !== "configured")
+            return;
           const numFrames = channels[0]?.length ?? 0;
           if (!numFrames) return;
           const numChannels = channels.length;
@@ -818,7 +912,19 @@ export const RecordingCanvas = forwardRef<
           for (let ch = 0; ch < numChannels; ch++) {
             planarData.set(channels[ch], ch * numFrames);
           }
-          const timestampUs = (sampleOffset / audioCtx.sampleRate) * 1_000_000;
+          // Preserve the audio rendering clock, including silent or missed input
+          // quanta. Counting only received nonempty blocks shortens the track.
+          const timestampUs = Math.round(
+            (contextTime - audioClockStartRef.current) * 1_000_000,
+          );
+          if (timestampUs < 0) return;
+          timingRef.current.audioFrames =
+            Number(timingRef.current.audioFrames ?? 0) + numFrames;
+          timingRef.current.audioInputEnd =
+            timestampUs / 1_000_000 + numFrames / audioCtx.sampleRate;
+          timingRef.current.audioInputWall =
+            (performance.now() - recordingStartTimeRef.current) / 1000;
+          timingRef.current.audioSampleRate = audioCtx.sampleRate;
           try {
             const audioData = new AudioData({
               format: "f32-planar",
@@ -833,14 +939,14 @@ export const RecordingCanvas = forwardRef<
           } catch (error) {
             console.error("[Audio] Failed to encode audio frame:", error);
           }
-          sampleOffset += numFrames;
         };
 
         // ScriptProcessorNode fallback: established WKWebView-compatible primitive.
         // The node must be connected through to audioCtx.destination for
         // onaudioprocess to fire when the only other consumer is a
         // MediaStreamDestinationNode.
-        const useScriptProcessor = () => {
+        const startScriptProcessor = () => {
+          timingRef.current.audioPath = "script-processor";
           const bufferSize = 4096;
           const scriptNode = audioCtx.createScriptProcessor(
             bufferSize,
@@ -853,7 +959,7 @@ export const RecordingCanvas = forwardRef<
             for (let ch = 0; ch < inputBuffer.numberOfChannels; ch++) {
               channels.push(inputBuffer.getChannelData(ch));
             }
-            emit(channels);
+            emit(channels, event.playbackTime);
           };
           const silentGain = audioCtx.createGain();
           silentGain.gain.value = 0;
@@ -872,10 +978,8 @@ export const RecordingCanvas = forwardRef<
         };
 
         if (audioCtx.audioWorklet) {
-          // Fire-and-forget: addModule is async but initializeWebCodecs is sync.
-          // A few 128-frame quanta at record-start may be missed during module
-          // registration (~1ms) — inaudible.
-          void (async () => {
+          // Finish worklet installation before starting the recording clock.
+          await (async () => {
             try {
               const blob = new Blob([ENCODE_WORKLET_CODE], {
                 type: "application/javascript",
@@ -884,12 +988,16 @@ export const RecordingCanvas = forwardRef<
               await audioCtx.audioWorklet.addModule(url);
               URL.revokeObjectURL(url);
 
+              timingRef.current.audioPath = "worklet";
               const node = new AudioWorkletNode(audioCtx, ENCODE_WORKLET_NAME, {
                 numberOfInputs: 1,
                 numberOfOutputs: 1,
                 outputChannelCount: [channelCount],
               });
-              node.port.onmessage = ({ data }) => emit(data as Float32Array[]);
+              node.port.onmessage = ({
+                data,
+              }: MessageEvent<{ channels: Float32Array[]; time: number }>) =>
+                emit(data.channels, data.time);
 
               const silentGain = audioCtx.createGain();
               silentGain.gain.value = 0;
@@ -911,11 +1019,11 @@ export const RecordingCanvas = forwardRef<
                 "[Audio] AudioWorklet unavailable, falling back to ScriptProcessorNode:",
                 e,
               );
-              useScriptProcessor();
+              startScriptProcessor();
             }
           })();
         } else {
-          useScriptProcessor();
+          startScriptProcessor();
         }
       } catch (error) {
         console.warn("[Audio] Failed to start audio processing:", error);
@@ -968,6 +1076,10 @@ export const RecordingCanvas = forwardRef<
             audioEncoder = new AudioEncoder({
               // Fires during encoding, after `muxer` below has been assigned.
               output: (chunk, metadata) => {
+                timingRef.current.audioOutputEnd =
+                  (chunk.timestamp + (chunk.duration ?? 0)) / 1_000_000;
+                timingRef.current.audioPackets =
+                  Number(timingRef.current.audioPackets ?? 0) + 1;
                 try {
                   // WKWebView/Safari hands a full ES_Descriptor as the
                   // description; pass the muxer the bare ASC so the esds isn't
@@ -980,7 +1092,10 @@ export const RecordingCanvas = forwardRef<
                     : null;
                   const fixedMeta =
                     dc && asc
-                      ? { ...metadata, decoderConfig: { ...dc, description: asc } }
+                      ? {
+                          ...metadata,
+                          decoderConfig: { ...dc, description: asc },
+                        }
                       : metadata;
                   if (holder.audioSource) {
                     const pkt = mb.EncodedPacket.fromEncodedChunk(chunk);
@@ -995,9 +1110,13 @@ export const RecordingCanvas = forwardRef<
                     audioLogWindowStartRef.current = chunk.timestamp;
                   }
                   audioBytesAccRef.current += chunk.byteLength;
-                  if (chunk.timestamp - audioLogWindowStartRef.current >= 5_000_000) {
+                  if (
+                    chunk.timestamp - audioLogWindowStartRef.current >=
+                    5_000_000
+                  ) {
                     const windowSecs =
-                      (chunk.timestamp - audioLogWindowStartRef.current) / 1_000_000;
+                      (chunk.timestamp - audioLogWindowStartRef.current) /
+                      1_000_000;
                     const effectiveKbps = (
                       (audioBytesAccRef.current * 8) /
                       windowSecs /
@@ -1118,7 +1237,7 @@ export const RecordingCanvas = forwardRef<
 
         if (audioEncoder && audioTrack) {
           audioEncoderRef.current = audioEncoder;
-          startAudioProcessing(audioTrack, audioEncoder);
+          await startAudioProcessing(audioTrack, audioEncoder);
           console.log(
             `[WebCodecs] Audio encoder initialized: ${AUDIO_NUM_CHANNELS}ch @ ${audioSampleRate}Hz`,
           );
@@ -1153,7 +1272,7 @@ export const RecordingCanvas = forwardRef<
         return false;
       }
     },
-    [startAudioProcessing, ensureAudioContext],
+    [startAudioProcessing, ensureAudioContext, videoBitrate],
   );
 
   /**
@@ -1165,8 +1284,10 @@ export const RecordingCanvas = forwardRef<
       width: number,
       height: number,
       fps: number,
+      audioTrack: MediaStreamTrack | null,
     ) => {
       const stream = canvas.captureStream(fps);
+      if (audioTrack) stream.addTrack(audioTrack);
       recordedChunksRef.current = [];
 
       let mimeType = "video/webm;codecs=vp9";
@@ -1199,8 +1320,19 @@ export const RecordingCanvas = forwardRef<
         );
         const blob = new Blob(recordedChunksRef.current, { type: mimeType });
         console.log(`[MediaRecorder] Final video size: ${blob.size} bytes`);
+        if (!blob.size) {
+          window.dispatchEvent(
+            new CustomEvent("recordingSaveFailed", {
+              detail: {
+                message: "No video frames were captured.",
+                retryable: false,
+              },
+            }),
+          );
+          return;
+        }
         const buffer = await blob.arrayBuffer();
-        await saveRecording(buffer);
+        await saveRecording(buffer).catch(() => {});
       };
 
       recorder.onerror = (event) => {
@@ -1214,7 +1346,7 @@ export const RecordingCanvas = forwardRef<
         `[MediaRecorder] Initialized: ${width}x${height} @ ${fps}fps`,
       );
     },
-    [saveRecording],
+    [saveRecording, videoBitrate],
   );
 
   /**
@@ -1253,8 +1385,18 @@ export const RecordingCanvas = forwardRef<
       // WebCodecs: create VideoFrame from canvas and encode
       if (useWebCodecsRef.current && encoder) {
         if (encoder.state === "configured") {
-          const timestampUs =
-            (performance.now() - recordingStartTimeRef.current) * 1000;
+          const timestampUs = recordingTimestampUs(
+            (performance.now() - recordingStartTimeRef.current) / 1000,
+            audioEncoderRef.current?.state === "configured" &&
+              audioContextRef.current
+              ? audioContextRef.current.currentTime - audioClockStartRef.current
+              : null,
+            lastVideoTimestampRef.current,
+          );
+          if (timestampUs === null) {
+            droppedFrameCountRef.current++;
+            return;
+          }
           const frameDurationUs = 1_000_000 / frameRateRef.current;
           const videoFrame = new VideoFrame(canvas, {
             timestamp: timestampUs,
@@ -1267,6 +1409,7 @@ export const RecordingCanvas = forwardRef<
           const isKeyFrame =
             frameCountRef.current % keyframeIntervalFrames === 0;
           encoder.encode(videoFrame, { keyFrame: isKeyFrame });
+          lastVideoTimestampRef.current = timestampUs;
           videoFrame.close();
         }
       }
@@ -1309,7 +1452,10 @@ export const RecordingCanvas = forwardRef<
       try {
         console.log(`[RecordingCanvas] Starting recording session`);
         recordingStartTimeRef.current = performance.now();
+        captureReadyRef.current = false;
+        timingRef.current = {};
         frameCountRef.current = 0;
+        lastVideoTimestampRef.current = -1;
         droppedFrameCountRef.current = 0;
         lastFrameTimeRef.current = performance.now();
         audioBytesAccRef.current = 0;
@@ -1364,13 +1510,16 @@ export const RecordingCanvas = forwardRef<
           audioTrack,
         );
         if (!webCodecsReady) {
-          initializeMediaRecorder(canvas, width, height, fps);
+          initializeMediaRecorder(canvas, width, height, fps, audioTrack);
           const recorder = mediaRecorderRef.current;
           if (!recorder) throw new Error("MediaRecorder not initialized");
           recorder.start(1000);
         }
 
         if (cancelled) return;
+        recordingStartTimeRef.current = performance.now();
+        audioClockStartRef.current = audioContextRef.current?.currentTime ?? 0;
+        captureReadyRef.current = true;
 
         const method = useWebCodecsRef.current
           ? "WebCodecs/MP4"
@@ -1422,131 +1571,164 @@ export const RecordingCanvas = forwardRef<
       }
     };
 
-    startRecording();
+    const initialization = startRecording();
 
     // Cleanup on stop
     return () => {
       cancelled = true;
-      console.log(`[RecordingCanvas] Cleanup - stopping recording`);
+      captureReadyRef.current = false;
+      timingRef.current.stoppedWall =
+        (performance.now() - recordingStartTimeRef.current) / 1000;
+      timingRef.current.stoppedAudioClock =
+        (audioContextRef.current?.currentTime ?? 0) -
+        audioClockStartRef.current;
+      const progress = (message: string) =>
+        window.dispatchEvent(
+          new CustomEvent("recordingSaveProgress", { detail: message }),
+        );
+      progress("Finishing capture initialization…");
+      // Initialization can still own the microphone or encoder when Stop is pressed.
+      // Wait for that owner before examining/clearing its refs.
+      void (async () => {
+        await initialization;
+        console.log(`[RecordingCanvas] Cleanup - stopping recording`);
 
-      if (frameIntervalRef.current !== null) {
-        window.cancelAnimationFrame(frameIntervalRef.current);
-        frameIntervalRef.current = null;
-      }
-      if (watchdogIntervalRef.current !== null) {
-        clearInterval(watchdogIntervalRef.current);
-        watchdogIntervalRef.current = null;
-      }
+        if (frameIntervalRef.current !== null) {
+          window.cancelAnimationFrame(frameIntervalRef.current);
+          frameIntervalRef.current = null;
+        }
+        if (watchdogIntervalRef.current !== null) {
+          clearInterval(watchdogIntervalRef.current);
+          watchdogIntervalRef.current = null;
+        }
 
-      // Stop audio processing (disconnect ScriptProcessorNode)
-      if (audioProcessingCleanupRef.current) {
-        audioProcessingCleanupRef.current();
-        audioProcessingCleanupRef.current = null;
-      }
+        // Stop audio processing (disconnect ScriptProcessorNode)
+        if (audioProcessingCleanupRef.current) {
+          audioProcessingCleanupRef.current();
+          audioProcessingCleanupRef.current = null;
+        }
 
-      // Stop native system-audio stream and disconnect its audio nodes
-      if (nativeSystemAudioCleanupRef.current) {
-        nativeSystemAudioCleanupRef.current();
-        nativeSystemAudioCleanupRef.current = null;
-      }
+        // Stop native system-audio stream and disconnect its audio nodes
+        if (nativeSystemAudioCleanupRef.current) {
+          nativeSystemAudioCleanupRef.current();
+          nativeSystemAudioCleanupRef.current = null;
+        }
 
-      // Clear record-time analysers and notify the caller.
-      micRecAnalyserRef.current = null;
-      sysRecAnalyserRef.current = null;
-      onAnalysersChangedRef.current?.(null, null);
+        // Clear record-time analysers and notify the caller.
+        micRecAnalyserRef.current = null;
+        sysRecAnalyserRef.current = null;
+        onAnalysersChangedRef.current?.(null, null);
 
-      // Snapshot the recording method before clearing refs
-      const wasUsingWebCodecs = useWebCodecsRef.current;
+        // Snapshot the recording method before clearing refs
+        const wasUsingWebCodecs = useWebCodecsRef.current;
 
-      if (wasUsingWebCodecs) {
-        // Finalize WebCodecs encoders and muxer, then save MP4
-        const videoEncoder = videoEncoderRef.current;
-        const audioEncoder = audioEncoderRef.current;
-        const muxer = muxerRef.current;
-        if (videoEncoder && muxer) {
-          (async () => {
-            try {
-              await videoEncoder.flush();
-              videoEncoder.close();
+        if (wasUsingWebCodecs) {
+          // Finalize WebCodecs encoders and muxer, then save MP4
+          const videoEncoder = videoEncoderRef.current;
+          const audioEncoder = audioEncoderRef.current;
+          const muxer = muxerRef.current;
+          if (videoEncoder && muxer) {
+            await (async () => {
+              try {
+                progress("Finishing video…");
+                await videoEncoder.flush();
+                videoEncoder.close();
 
-              if (audioEncoder && audioEncoder.state === "configured") {
-                await audioEncoder.flush();
-                audioEncoder.close();
-              }
+                if (audioEncoder && audioEncoder.state === "configured") {
+                  progress("Finishing audio…");
+                  await audioEncoder.flush();
+                  audioEncoder.close();
+                }
 
-              if (muxedChunkCountRef.current === 0) {
-                console.warn(
-                  "[WebCodecs] No video chunks were successfully muxed, skipping finalization",
+                if (muxedChunkCountRef.current === 0) {
+                  window.dispatchEvent(
+                    new CustomEvent("recordingSaveFailed", {
+                      detail: {
+                        message: "No video frames were captured.",
+                        retryable: false,
+                      },
+                    }),
+                  );
+                  console.warn(
+                    "[WebCodecs] No video chunks were successfully muxed, skipping finalization",
+                  );
+                  return;
+                }
+
+                // Drain the async add() chains so no packet is in flight when the
+                // file is sealed (mediabunny add()/finalize() are async).
+                progress("Preparing recording file…");
+                await Promise.all([muxer.videoTail, muxer.audioTail]);
+                muxer.videoSource.close();
+                muxer.audioSource?.close();
+                await muxer.output.finalize();
+                const mp4Buffer = muxer.target.buffer as ArrayBuffer;
+                progress("Saving recording…");
+                console.log(
+                  `[WebCodecs] MP4 finalized: ${mp4Buffer.byteLength} bytes (${muxedChunkCountRef.current} chunks)`,
                 );
-                return;
+                await saveRecording(mp4Buffer);
+              } catch (error) {
+                console.error("[WebCodecs] Error finalizing recording:", error);
+                onFrameErrorRef.current?.(String(error));
+                if (!pendingSaveRef.current)
+                  window.dispatchEvent(
+                    new CustomEvent("recordingSaveFailed", {
+                      detail: { message: String(error), retryable: false },
+                    }),
+                  );
               }
-
-              // Drain the async add() chains so no packet is in flight when the
-              // file is sealed (mediabunny add()/finalize() are async).
-              await Promise.all([muxer.videoTail, muxer.audioTail]);
-              await muxer.output.finalize();
-              const mp4Buffer = muxer.target.buffer as ArrayBuffer;
-              // Copy the bytes for the trim editor before saveRecording reads
-              // them. Only this WebCodecs/MP4 path emits the edit event — the
-              // MediaRecorder/WebM fallback doesn't — so the editor only ever
-              // opens for a seekable MP4.
-              const editBlob = new Blob([mp4Buffer], { type: "video/mp4" });
-              console.log(
-                `[WebCodecs] MP4 finalized: ${mp4Buffer.byteLength} bytes (${muxedChunkCountRef.current} chunks)`,
-              );
-              await saveRecording(mp4Buffer);
-              window.dispatchEvent(
-                new CustomEvent("recordingReadyForEdit", {
-                  detail: { blob: editBlob },
-                }),
-              );
+            })();
+          }
+          videoEncoderRef.current = null;
+          audioEncoderRef.current = null;
+          muxerRef.current = null;
+        } else {
+          // Stop MediaRecorder (triggers onstop handler which saves the file)
+          if (
+            mediaRecorderRef.current &&
+            mediaRecorderRef.current.state !== "inactive"
+          ) {
+            try {
+              mediaRecorderRef.current.stop();
+              console.log("[RecordingCanvas] MediaRecorder stopped");
             } catch (error) {
               console.error(
-                "[WebCodecs] Error finalizing recording:",
+                "[RecordingCanvas] Error stopping MediaRecorder:",
                 error,
               );
-              onFrameErrorRef.current?.(String(error));
             }
-          })();
-        }
-        videoEncoderRef.current = null;
-        audioEncoderRef.current = null;
-        muxerRef.current = null;
-      } else {
-        // Stop MediaRecorder (triggers onstop handler which saves the file)
-        if (
-          mediaRecorderRef.current &&
-          mediaRecorderRef.current.state !== "inactive"
-        ) {
-          try {
-            mediaRecorderRef.current.stop();
-            console.log("[RecordingCanvas] MediaRecorder stopped");
-          } catch (error) {
-            console.error(
-              "[RecordingCanvas] Error stopping MediaRecorder:",
-              error,
+          } else {
+            window.dispatchEvent(
+              new CustomEvent("recordingSaveFailed", {
+                detail: {
+                  message:
+                    "Recording stopped before capture was ready. Try again after the source preview appears.",
+                  retryable: false,
+                },
+              }),
             );
           }
         }
-      }
 
-      // Release audio resources
-      if (audioStreamRef.current) {
-        audioStreamRef.current.getTracks().forEach((t) => t.stop());
-        audioStreamRef.current = null;
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
-        audioContextRef.current = null;
-      }
+        // Release audio resources
+        if (audioStreamRef.current) {
+          audioStreamRef.current.getTracks().forEach((t) => t.stop());
+          audioStreamRef.current = null;
+        }
+        if (audioContextRef.current) {
+          audioContextRef.current.close().catch(() => {});
+          audioContextRef.current = null;
+        }
 
-      useWebCodecsRef.current = false;
+        useWebCodecsRef.current = false;
 
-      const elapsed =
-        (performance.now() - recordingStartTimeRef.current) / 1000;
-      console.log(
-        `[RecordingCanvas] Session ended: ${frameCountRef.current} frames, ${elapsed.toFixed(1)}s elapsed`,
-      );
+        const elapsed =
+          (performance.now() - recordingStartTimeRef.current) / 1000;
+        console.log(
+          `[RecordingCanvas] Session ended: ${frameCountRef.current} frames, ${elapsed.toFixed(1)}s elapsed`,
+        );
+      })();
     };
   }, [
     isRecording,

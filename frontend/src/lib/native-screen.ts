@@ -6,6 +6,8 @@ export { parseFrameHeader } from "./screen-wire";
 // Per-section active channels. Keyed by sectionIndex so stopNativeScreenStream
 // can neuter the onmessage closure and drop the capture of onFrame/canvas refs.
 const channels = new Map<number, Channel<ArrayBuffer>>();
+const configurations = new Map<number, { onFrame: (bitmap: ImageBitmap, frame: ScreenStreamFrame) => void; opts: NativeScreenOptions }>();
+let suspended = false;
 
 /**
  * Native screen capture streamed from the Rust backend.
@@ -57,6 +59,7 @@ export async function startNativeScreenStream(
   onFrame: (bitmap: ImageBitmap, frame: ScreenStreamFrame) => void,
   opts: NativeScreenOptions = {},
 ): Promise<Channel<ArrayBuffer>> {
+  configurations.set(sectionIndex, { onFrame, opts });
   const channel = new Channel<ArrayBuffer>();
 
   // Send one ack per decoded frame to restore backpressure credit in the worker.
@@ -66,17 +69,19 @@ export async function startNativeScreenStream(
   };
 
   channel.onmessage = (buf: ArrayBuffer) => {
+    if (suspended) { ack(); return; }
     const header = parseFrameHeader(buf);
     if (!header) { ack(); return; }
     const { width, height, timestampMs, jpegOffset } = header;
     const jpeg = new Blob([buf.slice(jpegOffset)], { type: "image/jpeg" });
     createImageBitmap(jpeg)
-      .then((bitmap) => { onFrame(bitmap, { width, height, timestampMs }); ack(); })
+      .then((bitmap) => { if(suspended)bitmap.close();else onFrame(bitmap, { width, height, timestampMs }); ack(); })
       .catch((e) => { console.warn("[native-screen] frame decode failed:", e); ack(); });
   };
 
   channels.set(sectionIndex, channel);
 
+  if (suspended) return channel;
   await invoke("start_screen_stream", {
     sectionIndex,
     displayIndex: opts.displayIndex ?? 0,
@@ -96,6 +101,7 @@ export async function listDisplays(): Promise<DisplayInfo[]> {
 
 /** Stop the native screen stream for a section (no-op if none is running). */
 export async function stopNativeScreenStream(sectionIndex: number): Promise<void> {
+  configurations.delete(sectionIndex);
   const channel = channels.get(sectionIndex);
   if (channel) {
     channel.onmessage = () => {};
@@ -105,5 +111,16 @@ export async function stopNativeScreenStream(sectionIndex: number): Promise<void
     await invoke("stop_screen_stream", { sectionIndex });
   } catch (e) {
     console.warn("[native-screen] stop failed:", e);
+  }
+}
+
+/** Keep source choices while releasing ScreenCaptureKit in Editing Mode. */
+export async function suspendNativeScreens(value: boolean): Promise<void> {
+  if (value === suspended) return;
+  suspended = value;
+  if (value) {
+    await Promise.all([...configurations.keys()].map(sectionIndex => invoke('stop_screen_stream', { sectionIndex })));
+  } else {
+    await Promise.all([...configurations.entries()].map(([index,config]) => startNativeScreenStream(index,config.onFrame,config.opts)));
   }
 }

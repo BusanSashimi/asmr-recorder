@@ -2,7 +2,7 @@
 
 # 🎙️ ASMR Recorder
 
-**A sleek desktop application for capturing high-fidelity audio and screen recordings**
+**A macOS desktop application for recording and editing audio and video**
 
 [![Tauri](https://img.shields.io/badge/Tauri-v2-FFC131?style=for-the-badge&logo=tauri&logoColor=white)](https://tauri.app/)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -18,10 +18,14 @@
 - 🎙️ **System + Mic Audio** — Microphone via `getUserMedia`; system / per-app audio captured natively through ScreenCaptureKit (macOS 14+)
 - 🖥️ **Native Screen & Region Capture** — Full-display or cropped-region capture via ScreenCaptureKit, streamed to the UI over a Tauri Channel
 - 🧩 **Multi-Section Composition** — Composite multiple screen/camera sources onto one canvas, encoded in-browser with WebCodecs (H.264)
+- 🎬 **Recording & Editing Modes** — Saved takes open in a native FilmCraft-powered editor with a multitrack timeline, effects, keyframes, masks, graphics, captions, mixing, multicam and export
+- 🗂️ **Editing Workspaces** — Dockable Apple-styled panels, native `.fcproj` projects, autosave/recovery, proxies and interchange
 - ✂️ **Lossless Trim Editor** — Post-record trimming via `mediabunny` packet-copy (no re-encode)
 - 🍎 **macOS 14+ first** — ScreenCaptureKit-based; non-macOS builds fall back to `cpal`/`scrap` stubs (not the supported path)
 
 ---
+
+See [the migration coverage and validation notes](docs/filmcraft-migration.md) for the implemented interfaces, tested workflows and remaining limitations.
 
 ## 🚀 Quick Start
 
@@ -30,7 +34,7 @@
 | Tool      | Version | Installation                                  |
 | --------- | ------- | --------------------------------------------- |
 | Node.js   | v18+    | [nodejs.org](https://nodejs.org/)             |
-| Rust      | Latest  | [rustup.rs](https://rustup.rs/)               |
+| Rust      | 1.95.0 (pinned) | [rustup.rs](https://rustup.rs/)               |
 | Tauri CLI | v2      | `npm install -g @tauri-apps/cli` _(optional)_ |
 
 ### System Dependencies

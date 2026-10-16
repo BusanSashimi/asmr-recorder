@@ -14,6 +14,9 @@ import type {
 } from "@/types/recording";
 
 interface RecordingContextValue {
+  captureActive: boolean;
+  setCaptureActive: (active: boolean) => void;
+  isSaving: boolean;
   config: RecordingConfig;
   updateConfig: (updates: Partial<RecordingConfig>) => void;
   status: RecordingStatus;
@@ -47,6 +50,9 @@ interface RecordingContextValue {
 const RecordingContext = createContext<RecordingContextValue | null>(null);
 
 export function RecordingProvider({ children }: { children: React.ReactNode }) {
+  const [captureActive, setCaptureActive] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [hasUnsavedTake,setHasUnsavedTake] = useState(false);
   const [config, setConfig] = useState<RecordingConfig>(defaultRecordingConfig);
   const [status, setStatus] = useState<RecordingStatus>({
     isRecording: false,
@@ -79,14 +85,14 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   // Live mic monitor — decoupled from the recording pipeline, runs whenever mic
   // is enabled so the level meter is visible while adjusting gain.
   const audioMonitor = useAudioMonitor(
-    externalConfig.captureMic,
+    captureActive && externalConfig.captureMic,
     externalConfig.micDeviceId,
   );
 
   // Live system-audio monitor via SCK — gated off while recording so only one
   // SCK stream runs at a time (monitor on index 99, recording on index 0).
   const systemAudioMonitor = useSystemAudioMonitor(
-    externalConfig.captureSystemAudio && !isExternalRecording,
+    captureActive && externalConfig.captureSystemAudio && !isExternalRecording && !isSaving,
     externalConfig.systemAudioApp,
   );
 
@@ -201,6 +207,8 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
 
   // Start recording via MediaRecorder (browser-native canvas recording)
   const startExternalRecording = useCallback(async () => {
+    if (hasUnsavedTake) throw new Error("Retry saving the previous recording before starting another.");
+    if (isSaving) throw new Error("Wait for the previous recording to finish saving.");
     setError(null);
     try {
       recordingStartTimeRef.current = Date.now();
@@ -211,12 +219,13 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
       setError(errorMessage);
       throw err;
     }
-  }, []);
+  }, [isSaving,hasUnsavedTake]);
 
   // Stop recording (MediaRecorder will save the file asynchronously via recording-canvas)
   const stopExternalRecording = useCallback(async () => {
     setError(null);
     try {
+      setIsSaving(true);
       setIsExternalRecording(false);
       setStatus((prev) => ({
         ...prev,
@@ -311,12 +320,19 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
       const customEvent = event as CustomEvent<{ path: string }>;
       const savedPath = customEvent.detail?.path;
       if (savedPath) {
+        setIsSaving(false);setHasUnsavedTake(false);
         setStatus((prev) => ({ ...prev, outputPath: savedPath }));
       }
     };
     window.addEventListener("recordingSaved", handleRecordingSaved);
+    const failed = (e:Event) => {setIsSaving(false);setHasUnsavedTake(!!(e as CustomEvent<{retryable:boolean}>).detail?.retryable);};
+    const saving = () => setIsSaving(true);
+    window.addEventListener("recordingSaving",saving);
+    window.addEventListener("recordingSaveFailed", failed);
     return () => {
       window.removeEventListener("recordingSaved", handleRecordingSaved);
+      window.removeEventListener("recordingSaveFailed", failed);
+      window.removeEventListener("recordingSaving",saving);
     };
   }, []);
 
@@ -332,6 +348,9 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value: RecordingContextValue = {
+    captureActive,
+    setCaptureActive,
+    isSaving,
     config,
     updateConfig,
     status,

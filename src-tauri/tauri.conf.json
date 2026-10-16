@@ -26,7 +26,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "createUpdaterArtifacts": true,
     "category": "public.app-category.utilities",
     "icon": [
@@ -40,6 +43,9 @@
       "entitlements": "entitlements.plist",
       "frameworks": [],
       "minimumSystemVersion": "14.0"
+    },
+    "resources": {
+      "../licenses/filmcraft/": "licenses/filmcraft/"
     }
   },
   "plugins": {
