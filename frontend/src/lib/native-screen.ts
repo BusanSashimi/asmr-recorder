@@ -3,11 +3,26 @@ import { parseFrameHeader } from "./screen-wire";
 export type { FrameHeader } from "./screen-wire";
 export { parseFrameHeader } from "./screen-wire";
 
-// Per-section active channels. Keyed by sectionIndex so stopNativeScreenStream
-// can neuter the onmessage closure and drop the capture of onFrame/canvas refs.
-const channels = new Map<number, Channel<ArrayBuffer>>();
-const configurations = new Map<number, { onFrame: (bitmap: ImageBitmap, frame: ScreenStreamFrame) => void; opts: NativeScreenOptions }>();
+import { captureProfileKey, nativeCaptureTarget, type CaptureProfile, type CaptureTarget } from "./native-capture-target";
+
+type FrameCallback = (bitmap: ImageBitmap, frame: ScreenStreamFrame) => void;
+interface Source { onFrame: FrameCallback; opts: NativeScreenOptions }
+interface Active { channel: Channel<ArrayBuffer>; streamId: string; key: string; ready: boolean; timestamp: number }
+const channels = new Map<number, Active>();
+const configurations = new Map<number, Source>();
+const starting = new Map<number, symbol>();
 let suspended = false;
+let lifecycle = 0;
+let version = 0;
+let profile: CaptureProfile | undefined;
+let tail: Promise<unknown> = Promise.resolve();
+let reconciliation: Promise<void> | undefined;
+const cancelled = () => ({ kind: "cancelled", message: "Screen capture preparation was cancelled." });
+function enqueue<T>(task: () => Promise<T>): Promise<T> {
+  const result = tail.then(task);
+  tail = result.catch(() => {});
+  return result;
+}
 
 /**
  * Native screen capture streamed from the Rust backend.
@@ -32,95 +47,182 @@ export interface DisplayInfo {
   width: number;
   height: number;
   isPrimary: boolean;
+  /** Backing pixels per logical point; width/height are points on macOS. */
+  pointPixelScale: number;
 }
+
+export type DisplayGeometry = Pick<DisplayInfo, "width" | "height" | "pointPixelScale">;
 
 export interface NativeScreenOptions {
   /** Display index to capture (0 = primary). */
   displayIndex?: number;
+  displayId?: number;
+  expectedGeometry?: DisplayGeometry;
   /** Target capture frame rate. */
   fps?: number;
   /** Longest output dimension in px (frames are downscaled to fit). */
   maxDimension?: number;
-  /** Optional crop region in display pixels. Omit for full display. */
+  targetSize?: CaptureTarget;
+  /** Display-local crop: logical points on macOS, pixels elsewhere. */
   region?: { x: number; y: number; width: number; height: number };
 }
 
-/**
- * Start a native screen stream for a section. Decoded frames are delivered to
- * `onFrame` as ImageBitmaps — the caller MUST close each bitmap after drawing.
- *
- * Returns the Channel so the caller can retain it for the stream's lifetime and
- * stop it with `stopNativeScreenStream(sectionIndex)`. (Tauri keeps the onmessage
- * callback alive in an internal registry, so delivery does not depend on the
- * reference being held; the backend stops only when stop_screen_stream is called.)
- */
-export async function startNativeScreenStream(
-  sectionIndex: number,
-  onFrame: (bitmap: ImageBitmap, frame: ScreenStreamFrame) => void,
-  opts: NativeScreenOptions = {},
-): Promise<Channel<ArrayBuffer>> {
-  configurations.set(sectionIndex, { onFrame, opts });
-  const channel = new Channel<ArrayBuffer>();
-
-  // Send one ack per decoded frame to restore backpressure credit in the worker.
-  // Always ack (even on failure) so a single bad frame can't starve the stream.
-  const ack = () => {
-    invoke("ack_screen_frame", { sectionIndex }).catch(() => {});
-  };
-
-  channel.onmessage = (buf: ArrayBuffer) => {
-    if (suspended) { ack(); return; }
-    const header = parseFrameHeader(buf);
-    if (!header) { ack(); return; }
-    const { width, height, timestampMs, jpegOffset } = header;
-    const jpeg = new Blob([buf.slice(jpegOffset)], { type: "image/jpeg" });
-    createImageBitmap(jpeg)
-      .then((bitmap) => { if(suspended)bitmap.close();else onFrame(bitmap, { width, height, timestampMs }); ack(); })
-      .catch((e) => { console.warn("[native-screen] frame decode failed:", e); ack(); });
-  };
-
-  channels.set(sectionIndex, channel);
-
-  if (suspended) return channel;
-  await invoke("start_screen_stream", {
-    sectionIndex,
-    displayIndex: opts.displayIndex ?? 0,
-    fps: opts.fps ?? 30,
-    maxDimension: opts.maxDimension ?? 1280,
-    region: opts.region ?? null,
-    onFrame: channel,
-  });
-
-  return channel;
+function targetFor(index: number, opts: NativeScreenOptions) {
+  if (!profile || !opts.expectedGeometry) {
+    return { targetSize: opts.targetSize, maxDimension: opts.maxDimension ?? 1280, fps: opts.fps ?? 30 };
+  }
+  const targetSize = nativeCaptureTarget(index, opts.expectedGeometry, opts.region, profile);
+  return targetSize ? { targetSize, maxDimension: Math.max(targetSize.width, targetSize.height), fps: profile.frameRate ?? 30 } : null;
 }
 
-/** Enumerate available displays. Returns ≥1 entry; primary is first on macOS. */
+async function pauseSection(sectionIndex: number) {
+  const active = channels.get(sectionIndex);
+  if (!active) return;
+  active.ready = false;
+  channels.delete(sectionIndex);
+  active.channel.onmessage = () => {};
+  await invoke("stop_screen_stream", { sectionIndex, streamId: active.streamId });
+}
+
+async function launch(sectionIndex: number, source: Source, target: NonNullable<ReturnType<typeof targetFor>>,
+  current: () => boolean): Promise<Channel<ArrayBuffer>> {
+  const channel = new Channel<ArrayBuffer>();
+  const streamId = crypto.randomUUID();
+  const active: Active = { channel, streamId, key: JSON.stringify(target), ready: false, timestamp: -1 };
+  let pending: ArrayBuffer | undefined;
+  const isCurrent = () => !suspended && active.ready && channels.get(sectionIndex) === active;
+  const ack = () => { void invoke("ack_screen_frame", { sectionIndex, streamId }).catch(() => {}); };
+  channel.onmessage = (buf: ArrayBuffer) => {
+    if (!active.ready && current() && !suspended) {
+      if (pending) ack();
+      pending = buf;
+      return;
+    }
+    if (!isCurrent()) { ack(); return; }
+    const header = parseFrameHeader(buf);
+    if (!header) { ack(); return; }
+    const jpeg = new Blob([buf.slice(header.jpegOffset)], { type: "image/jpeg" });
+    void createImageBitmap(jpeg).then(bitmap => {
+      if (!isCurrent() || header.timestampMs <= active.timestamp) { bitmap.close(); return; }
+      active.timestamp = header.timestampMs;
+      try { source.onFrame(bitmap, header); } catch (error) { bitmap.close(); throw error; }
+    }).catch(error => console.warn("[native-screen] frame decode failed:", error)).finally(ack);
+  };
+  try {
+    await invoke("start_screen_stream", {
+      sectionIndex, streamId,
+      displayIndex: source.opts.displayIndex ?? 0,
+      displayId: source.opts.displayId ?? null,
+      expectedGeometry: source.opts.expectedGeometry ?? null,
+      region: source.opts.region ?? null,
+      targetSize: target.targetSize ?? null,
+      maxDimension: target.maxDimension, fps: target.fps, onFrame: channel,
+    });
+    if (!current() || suspended) {
+      await invoke("stop_screen_stream", { sectionIndex, streamId });
+      throw cancelled();
+    }
+    const previous = channels.get(sectionIndex);
+    if (previous) { previous.ready = false; previous.channel.onmessage = () => {}; }
+    channels.set(sectionIndex, active);
+    active.ready = true;
+    if (pending) { const frame = pending; pending = undefined; channel.onmessage(frame); }
+    return channel;
+  } catch (error) {
+    pending = undefined;
+    channel.onmessage = () => {};
+    throw error;
+  }
+}
+
+/** Retain the old selection until the new native capture has started successfully. */
+export function startNativeScreenStream(sectionIndex: number, onFrame: FrameCallback,
+  opts: NativeScreenOptions = {}): Promise<Channel<ArrayBuffer>> {
+  const operation = Symbol();
+  const epoch = lifecycle;
+  starting.set(sectionIndex, operation);
+  const current = () => epoch === lifecycle && starting.get(sectionIndex) === operation;
+  return enqueue(async () => {
+    if (!current() || suspended) throw cancelled();
+    const source = { onFrame, opts };
+    const target = targetFor(sectionIndex, opts);
+    // Initial source selection must be capturable in the current layout.
+    if (!target) throw cancelled();
+    const channel = await launch(sectionIndex, source, target, current);
+    configurations.set(sectionIndex, source);
+    version++;
+    return channel;
+  }).finally(() => { if (starting.get(sectionIndex) === operation) starting.delete(sectionIndex); });
+}
+
 export async function listDisplays(): Promise<DisplayInfo[]> {
   return invoke<DisplayInfo[]>("list_displays");
 }
 
-/** Stop the native screen stream for a section (no-op if none is running). */
-export async function stopNativeScreenStream(sectionIndex: number): Promise<void> {
+/** Forget a selection immediately; serialize backend stop with any pending startup. */
+export function stopNativeScreenStream(sectionIndex: number): Promise<void> {
   configurations.delete(sectionIndex);
-  const channel = channels.get(sectionIndex);
-  if (channel) {
-    channel.onmessage = () => {};
-    channels.delete(sectionIndex);
-  }
-  try {
-    await invoke("stop_screen_stream", { sectionIndex });
-  } catch (e) {
-    console.warn("[native-screen] stop failed:", e);
-  }
+  starting.delete(sectionIndex);
+  version++;
+  const active = channels.get(sectionIndex);
+  if (active) active.ready = false;
+  return enqueue(() => pauseSection(sectionIndex)).catch(error => {
+    console.warn("[native-screen] stop failed:", error);
+  });
 }
 
-/** Keep source choices while releasing ScreenCaptureKit in Editing Mode. */
+/** Coalesce profile changes; only the latest layout/resolution/fps is applied. */
+export function reconcileNativeScreens(next?: CaptureProfile): Promise<void> {
+  if (next && (!profile || captureProfileKey(next) !== captureProfileKey(profile))) {
+    profile = { ...next };
+    version++;
+  }
+  if (reconciliation) return reconciliation;
+  const result = enqueue(async () => {
+    for (;;) {
+      const revision = version;
+      if (suspended) return;
+      for (const [index, source] of configurations) {
+        if (suspended) throw cancelled();
+        const target = targetFor(index, source.opts);
+        if (!target) { await pauseSection(index); continue; }
+        if (channels.get(index)?.key === JSON.stringify(target) && channels.get(index)?.ready) continue;
+        const epoch = lifecycle;
+        await launch(index, source, target, () => configurations.get(index) === source && epoch === lifecycle);
+        if (revision !== version) break;
+      }
+      if (revision === version) return;
+    }
+  });
+  reconciliation = result;
+  const clear = () => { if (reconciliation === result) reconciliation = undefined; };
+  void result.then(clear, clear);
+  return result;
+}
+
+/** A recording starts only after all selected, visible native sources are current. */
+export async function prepareNativeScreens(next: CaptureProfile): Promise<void> {
+  const epoch = lifecycle;
+  await reconcileNativeScreens(next);
+  // A selection can have been queued behind an earlier reconciliation.
+  await tail;
+  await reconcileNativeScreens();
+  if (suspended || epoch !== lifecycle) throw cancelled();
+}
+
+/** Retain source choices and latest profile while releasing native capture. */
 export async function suspendNativeScreens(value: boolean): Promise<void> {
   if (value === suspended) return;
   suspended = value;
+  lifecycle++;
+  version++;
   if (value) {
-    await Promise.all([...configurations.keys()].map(sectionIndex => invoke('stop_screen_stream', { sectionIndex })));
+    starting.clear();
+    channels.forEach(active => { active.ready = false; });
+    await enqueue(async () => {
+      for (const index of [...channels.keys()]) await pauseSection(index);
+    });
   } else {
-    await Promise.all([...configurations.entries()].map(([index,config]) => startNativeScreenStream(index,config.onFrame,config.opts)));
+    await reconcileNativeScreens();
   }
 }

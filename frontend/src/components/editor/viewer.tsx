@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Waveform } from "./waveform";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -18,36 +24,40 @@ import {
   seconds,
   tickAtSeconds,
 } from "@/lib/editor-time";
+import type { ProgramTransport, Transport } from "@/lib/editor-transport";
 
-export interface Transport {
-  playing: boolean;
-  speed: number;
-  looping: boolean;
-  time: string;
-  sourceTime: string;
-  target: "source" | "program";
-  note?: string;
-}
+const noSubscription = () => () => {};
+const noProgramState = () => null;
+
 export function EditorViewer({
   time,
   onTime,
-  transportRef,
+  programTransport,
   source = false,
 }: {
   source?: boolean;
   time: string;
-  onTime: (time: string) => void;
-  transportRef: React.MutableRefObject<
-    ((action: string, time?: string) => Promise<void>) | null
-  >;
+  onTime?: (time: string) => void;
+  programTransport?: ProgramTransport;
 }) {
   const { snapshot, execute } = useEditor();
   const canvas = useRef<HTMLCanvasElement>(null);
   const viewer = useRef<HTMLDivElement>(null);
-  const [playing, setPlaying] = useState(false);
+  const program = useSyncExternalStore(
+    programTransport?.subscribe ?? noSubscription,
+    programTransport?.getSnapshot ?? noProgramState,
+  );
+  const [sourcePlaying, setPlaying] = useState(false);
+  const playing = program
+    ? !program.seeking &&
+      !!program.status?.playing && program.status.target === "program"
+    : sourcePlaying;
   const [error, setError] = useState<string | null>(null);
-  const [playback, setPlayback] = useState({ speed: 1, looping: false });
-  const [note, setNote] = useState<string | null>(null);
+  const [sourcePlayback, setPlayback] = useState({ speed: 1, looping: false });
+  const [sourceNote, setNote] = useState<string | null>(null);
+  const playback = program?.status ?? sourcePlayback;
+  const note = program?.status?.note ?? sourceNote;
+  const message = program?.error ?? error;
   const timeRef = useRef(time);
   const revisionRef = useRef(snapshot?.revision);
   const lastFrame = useRef("");
@@ -55,6 +65,7 @@ export function EditorViewer({
   revisionRef.current = snapshot?.revision;
   const transport = useCallback(
     async (action: string, at?: string) => {
+      if (programTransport) return programTransport.run(action, at);
       try {
         const status = await invoke<Transport>("editor_transport", {
           action:
@@ -69,21 +80,15 @@ export function EditorViewer({
         setPlaying(
           status.playing && status.target === (source ? "source" : "program"),
         );
-        onTime(source ? status.sourceTime : status.time);
+        onTime?.(source ? status.sourceTime : status.time);
         setNote(status.note ?? null);
         setError(null);
       } catch (e) {
         setError(String(e));
       }
     },
-    [onTime, source],
+    [onTime, source, programTransport],
   );
-  useEffect(() => {
-    transportRef.current = transport;
-    return () => {
-      transportRef.current = null;
-    };
-  }, [transport, transportRef]);
   const sourceItem = snapshot?.source?.item;
   const sourceMedia = snapshot?.source?.media;
   const audioOnly =
@@ -97,29 +102,40 @@ export function EditorViewer({
     let wasActive = false;
     let timer: ReturnType<typeof setTimeout>;
     async function frame() {
+      let version = programTransport?.version ?? 0;
       try {
+        const statusVersion = version;
         const status = await invoke<Transport>("editor_transport", {
           action: "status",
           time: null,
         });
         if (cancelled) return;
-        const active =
-          status.playing && status.target === (source ? "source" : "program");
-        setPlayback({ speed: status.speed, looping: status.looping });
-        setNote(status.note ?? null);
-        setPlaying(active);
-        if (active || wasActive)
-          onTime(source ? status.sourceTime : status.time);
+        const currentStatus = !programTransport || (
+          programTransport.isCurrent(statusVersion) &&
+          !programTransport.getSnapshot().seeking
+        );
+        const active = currentStatus && status.playing &&
+          status.target === (source ? "source" : "program");
+        if (programTransport) {
+          programTransport.observe(status, statusVersion, active || wasActive);
+        } else {
+          setPlayback({ speed: status.speed, looping: status.looping });
+          setNote(status.note ?? null);
+          setPlaying(active);
+          if (active || wasActive)
+            onTime?.(source ? status.sourceTime : status.time);
+        }
         const at =
-          active || wasActive
+          currentStatus && (active || wasActive)
             ? source
               ? status.sourceTime
               : status.time
-            : timeRef.current;
+            : (programTransport?.getSnapshot().time ?? timeRef.current);
         wasActive = active;
+        version = programTransport?.version ?? 0;
         const rev = revisionRef.current;
         const width = Math.round(viewer.current?.clientWidth ?? 640);
-        const key = `${rev}:${at}:${width}`;
+        const key = `${snapshot?.path}:${source ? sourceItem : snapshot?.state.active_sequence}:${rev}:${at}:${width}`;
         if (!audioOnly && key !== lastFrame.current) {
           const raw = await invoke<ArrayBuffer>("editor_frame", {
             time: at,
@@ -128,8 +144,9 @@ export function EditorViewer({
           });
           if (
             cancelled ||
+            (programTransport && !programTransport.isCurrent(version)) ||
             rev !== revisionRef.current ||
-            (!status.playing && at !== timeRef.current)
+            (!active && at !== (programTransport?.getSnapshot().time ?? timeRef.current))
           )
             return;
           const buffer =
@@ -153,7 +170,8 @@ export function EditorViewer({
           setError(null);
         }
       } catch (e) {
-        if (!cancelled) setError(String(e));
+        if (!cancelled && (!programTransport || programTransport.isCurrent(version)))
+          setError(String(e));
       } finally {
         if (!cancelled)
           timer = setTimeout(
@@ -170,12 +188,14 @@ export function EditorViewer({
       clearTimeout(timer);
     };
   }, [
+    snapshot?.path,
     snapshot?.state.active_sequence,
     sourceItem,
     onTime,
     playing,
     source,
     audioOnly,
+    programTransport,
   ]);
   useEffect(
     () => () => {
@@ -250,9 +270,9 @@ export function EditorViewer({
             </p>
           </div>
         )}
-        {error && (
+        {message && (
           <p role="status" className="editor-viewer-message">
-            {error}
+            {message}
           </p>
         )}
       </div>
@@ -381,15 +401,11 @@ export function SourceViewer() {
     (time: string) => setLocal({ item: sourceItem, time }),
     [sourceItem],
   );
-  const transportRef = useRef<
-    ((action: string, time?: string) => Promise<void>) | null
-  >(null);
   return (
     <EditorViewer
       source
       time={time}
       onTime={setTime}
-      transportRef={transportRef}
     />
   );
 }

@@ -3,8 +3,10 @@ import {
   useContext,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -12,7 +14,8 @@ import { FolderOpen, Save, Undo2, Redo2, Upload } from "lucide-react";
 import { useEditor } from "@/contexts/editor-state";
 import { Button } from "@/components/ui/button";
 import { EditorTimeline } from "./timeline";
-import { EditorViewer, SourceViewer, type Transport } from "./viewer";
+import { EditorViewer, SourceViewer } from "./viewer";
+import { ProgramTransport, type Transport } from "@/lib/editor-transport";
 import { EffectInspector, EffectsBrowser } from "./effects";
 import { HistoryPanel, MediaBrowser, TextPanel } from "./panels";
 import { CommandsPanel } from "./commands";
@@ -64,11 +67,8 @@ type Panel = keyof typeof panels;
 const workspaces = ["Assembly", "Editing", "Color", "Effects", "Audio"];
 const DockContext = createContext<{
   time: string;
-  seek: (t: string) => void;
-  setTime: (t: string) => void;
-  transportRef: React.MutableRefObject<
-    ((action: string, time?: string) => Promise<void>) | null
-  >;
+  seek: ProgramTransport["seek"];
+  transport: ProgramTransport;
 } | null>(null);
 function DockPanel({ api }: IDockviewPanelProps) {
   const ctx = useContext(DockContext)!;
@@ -78,8 +78,7 @@ function DockPanel({ api }: IDockviewPanelProps) {
       return (
         <EditorViewer
           time={ctx.time}
-          onTime={ctx.setTime}
-          transportRef={ctx.transportRef}
+          programTransport={ctx.transport}
         />
       );
     case "source":
@@ -204,38 +203,24 @@ export function EditingWorkspace() {
   const layoutSubscription = useRef<{ dispose: () => void } | null>(null);
   const trimInput = useRef<HTMLInputElement>(null);
   const sequenceId = snapshot?.state.active_sequence;
-  const [local, setLocal] = useState<{
-    sequence: string | null | undefined;
-    time: string;
-  } | null>(null);
-  const time =
-    local?.sequence === sequenceId
-      ? (local?.time ?? "0")
-      : sequenceId
-        ? (snapshot?.state.playheads[sequenceId] ?? "0")
-        : "0";
-  const setTime = useCallback(
-    (time: string) => setLocal({ sequence: sequenceId, time }),
-    [sequenceId],
+  const transport = useMemo(
+    () => new ProgramTransport((action, time) =>
+      invoke<Transport>("editor_transport", { action, time: time ?? null }),
+    ),
+    // A project/sequence change invalidates queued seeks and responses.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snapshot?.path, sequenceId],
   );
+  useEffect(() => () => transport.cancel(), [transport]);
+  const program = useSyncExternalStore(transport.subscribe, transport.getSnapshot);
+  const time = program.time ?? (sequenceId
+    ? (snapshot?.state.playheads[sequenceId] ?? "0")
+    : "0");
+  const seek = transport.seek;
   const [exportOpen, setExportOpen] = useState(false);
-  const transportRef = useRef<
-    ((action: string, time?: string) => Promise<void>) | null
-  >(null);
   const report = (p: Promise<unknown>) => {
     void p.catch(() => {});
   };
-  const seek = useCallback(
-    (t: string) => {
-      setTime(t);
-      if (transportRef.current) void transportRef.current("seek", t);
-      else
-        void invoke("editor_transport", { action: "seek", time: t }).catch(
-          () => {},
-        );
-    },
-    [setTime],
-  );
   useEffect(() => () => layoutSubscription.current?.dispose(), []);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -253,6 +238,10 @@ export function EditingWorkspace() {
         e.preventDefault();
         if (trim) {
           report(execute("trim.playAround", { toggle: true }));
+          return;
+        }
+        if (!source) {
+          void transport.run("toggle");
           return;
         }
         void invoke<Transport>("editor_transport", {
@@ -288,7 +277,11 @@ export function EditingWorkspace() {
               );
             return;
           }
-          if (!e.repeat)
+          if (!e.repeat && !source)
+            void transport.run(
+              key === "k" ? "pause" : key === "j" ? "reverse" : "forward",
+            );
+          else if (!e.repeat)
             void invoke("editor_transport", {
               action:
                 key === "k"
@@ -359,7 +352,7 @@ export function EditingWorkspace() {
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [snapshot?.commands, execute, saveProject]);
+  }, [snapshot?.commands, execute, saveProject, transport]);
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -387,7 +380,8 @@ export function EditingWorkspace() {
       ))
     )
       return;
-    await transportRef.current?.("pause");
+    await transport.run("pause");
+    transport.cancel();
     await openProject();
   }
   function selectWorkspace(name: string, reset = false) {
@@ -590,7 +584,7 @@ export function EditingWorkspace() {
           </Button>
         </div>
       )}
-      <DockContext.Provider value={{ time, seek, setTime, transportRef }}>
+      <DockContext.Provider value={{ time, seek, transport }}>
         <div className="editor-dock-area">
           <DockviewReact
             components={dockComponents}

@@ -378,7 +378,7 @@ function ASMRRecorderContent() {
         <div className="flex-1 min-h-0 flex">
           {/* Preview column */}
           <div className="flex flex-col flex-1 min-w-0 min-h-0">
-            <Preview isRecording={status.isRecording} />
+            <Preview isRecording={status.isRecording} isActive={mode === "recording"} />
           </div>
 
           {/* Inspector — animated width, content fixed at 264px so it doesn't reflow */}

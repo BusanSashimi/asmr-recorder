@@ -24,6 +24,7 @@ import { useRecordingContext } from "@/contexts/recording-context";
 import { formatDuration } from "@/types/recording";
 import { StereoMeter } from "./audio-monitor-graphics";
 import { spring } from "@/lib/motion";
+import { computeSlots } from "@/lib/layouts";
 import type { Update } from "@/lib/updater";
 
 interface ToolbarProps {
@@ -54,6 +55,7 @@ export function Toolbar({
     recordingAnalysers,
     isExternalRecording,
     startExternalRecording,
+    isPreparingCapture,
     stopExternalRecording,
     isSaving,
   } = useRecordingContext();
@@ -111,6 +113,7 @@ export function Toolbar({
         });
       }
     } catch (err) {
+      if (err && typeof err === "object" && "kind" in err && err.kind === "cancelled") return;
       toast({
         title: "Recording failed",
         description: String(err),
@@ -137,7 +140,8 @@ export function Toolbar({
     }
   };
 
-  const hasContent = sectionState.sections.some((s) => s.source !== null);
+  const hasContent = computeSlots(externalConfig.layout, externalConfig)
+    .some(slot => sectionState.sections[slot.section].source !== null);
 
   const activeSectionCount = sectionState.sections.filter(
     (s) => s.source !== null,
@@ -155,7 +159,7 @@ export function Toolbar({
               size="default"
               className="rounded-full gap-1.5 tabular-nums"
               onClick={handleRecord}
-              disabled={!hasContent || isSaving}
+              disabled={!hasContent || isSaving || isPreparingCapture}
               aria-label={
                 !hasContent
                   ? "Add a source to start recording"
@@ -179,7 +183,7 @@ export function Toolbar({
               ) : (
                 <>
                   <Circle className="h-3.5 w-3.5 fill-current shrink-0" />
-                  {isSaving ? "Saving…" : "Record"}
+                  {isSaving ? "Saving…" : isPreparingCapture ? "Preparing…" : "Record"}
                 </>
               )}
             </Button>

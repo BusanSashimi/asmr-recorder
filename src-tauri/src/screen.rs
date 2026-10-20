@@ -1,7 +1,7 @@
 use std::time::Duration;
 use tauri::command;
 
-/// A sub-region of a display to capture (in display pixels).
+/// Display-local capture coordinates: logical points on macOS, pixels elsewhere.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct CaptureRegion {
     pub x: u32,
@@ -69,8 +69,13 @@ pub struct ScreenCaptureConfig {
     pub fps: u32,
     /// Display index to capture (0 = primary)
     pub display_index: usize,
-    /// Optional crop region in display pixels. None = full display.
+    /// Stable macOS display ID. When present, never fall back to an array index.
+    pub display_id: Option<u32>,
+    pub expected_geometry: Option<DisplayGeometry>,
+    /// Optional crop in display-local coordinates. None = full display.
     pub region: Option<CaptureRegion>,
+    /// Requested output pixels; macOS scales before copying a native buffer.
+    pub target_size: Option<CaptureSize>,
 }
 
 impl Default for ScreenCaptureConfig {
@@ -78,13 +83,65 @@ impl Default for ScreenCaptureConfig {
         Self {
             fps: 30,
             display_index: 0,
+            display_id: None,
+            expected_geometry: None,
             region: None,
+            target_size: None,
         }
     }
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Crop stays in logical points; output is bounded by available backing pixels.
+pub fn capture_geometry(
+    width: u32,
+    height: u32,
+    backing_scale: f32,
+    region: Option<&CaptureRegion>,
+    target: Option<&CaptureSize>,
+) -> Result<(CaptureRegion, CaptureSize), String> {
+    if width == 0 || height == 0 || !backing_scale.is_finite() || backing_scale <= 0.0 {
+        return Err("Invalid display geometry.".into());
+    }
+    let r = region.cloned().unwrap_or(CaptureRegion {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    });
+    if r.x >= width || r.y >= height || r.width == 0 || r.height == 0 {
+        return Err("The capture region is outside the selected display.".into());
+    }
+    let crop = CaptureRegion {
+        width: r.width.min(width - r.x),
+        height: r.height.min(height - r.y),
+        ..r
+    };
+    let scale = if let Some(target) = target {
+        if target.width == 0 || target.height == 0 {
+            return Err("Invalid capture output size.".into());
+        }
+        (target.width as f64 / crop.width as f64)
+            .min(target.height as f64 / crop.height as f64)
+            .min(backing_scale as f64)
+    } else {
+        1.0
+    };
+    let size = CaptureSize {
+        width: (crop.width as f64 * scale).ceil().max(1.0) as u32,
+        height: (crop.height as f64 * scale).ceil().max(1.0) as u32,
+    };
+    Ok((crop, size))
+}
+
 /// Display information returned by list_displays.
-#[derive(serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayInfo {
     pub index: usize,
@@ -92,6 +149,69 @@ pub struct DisplayInfo {
     pub width: u32,
     pub height: u32,
     pub is_primary: bool,
+    /// Backing pixels per logical point (1 outside macOS).
+    pub point_pixel_scale: f32,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayGeometry {
+    pub width: u32,
+    pub height: u32,
+    pub point_pixel_scale: f32,
+}
+
+impl DisplayInfo {
+    pub fn matches_geometry(&self, expected: &DisplayGeometry) -> bool {
+        self.width == expected.width
+            && self.height == expected.height
+            && (self.point_pixel_scale - expected.point_pixel_scale).abs() < 0.001
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn describe_display(
+    display: &screencapturekit::shareable_content::SCDisplay,
+    index: usize,
+) -> DisplayInfo {
+    use screencapturekit::stream::content_filter::SCContentFilter;
+    let filter = SCContentFilter::create()
+        .with_display(display)
+        .with_excluding_windows(&[])
+        .build();
+    let frame = display.frame();
+    DisplayInfo {
+        index,
+        display_id: display.display_id(),
+        width: display.width(),
+        height: display.height(),
+        is_primary: frame.x == 0.0 && frame.y == 0.0,
+        point_pixel_scale: filter.point_pixel_scale(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn resolve_display<'a>(
+    displays: &'a [screencapturekit::shareable_content::SCDisplay],
+    config: &ScreenCaptureConfig,
+) -> Result<&'a screencapturekit::shareable_content::SCDisplay, String> {
+    let display = if let Some(id) = config.display_id {
+        displays.iter().find(|d| d.display_id() == id)
+    } else {
+        displays.get(config.display_index)
+    }
+    .ok_or_else(|| {
+        "The selected display is no longer connected. Choose a display again.".to_string()
+    })?;
+    if let Some(expected) = &config.expected_geometry {
+        if !describe_display(display, 0).matches_geometry(expected) {
+            return Err(
+                "The selected display's dimensions or scale changed. Refresh and choose it again."
+                    .into(),
+            );
+        }
+    }
+    Ok(display)
 }
 
 #[cfg(target_os = "macos")]
@@ -126,16 +246,7 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
                     .displays()
                     .iter()
                     .enumerate()
-                    .map(|(index, display)| {
-                        let frame = display.frame();
-                        DisplayInfo {
-                            index,
-                            display_id: display.display_id(),
-                            width: display.width(),
-                            height: display.height(),
-                            is_primary: frame.x == 0.0 && frame.y == 0.0,
-                        }
-                    })
+                    .map(|(index, display)| describe_display(display, index))
                     .collect();
                 Ok(infos)
             }
@@ -152,6 +263,7 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
                 width: m.width().unwrap_or(1920),
                 height: m.height().unwrap_or(1080),
                 is_primary: true,
+                point_pixel_scale: 1.0,
             }]),
             Err(e) => Err(format!("Failed to access displays: {}", e)),
         }
@@ -166,6 +278,7 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
                 width: d.width() as u32,
                 height: d.height() as u32,
                 is_primary: true,
+                point_pixel_scale: 1.0,
             }]),
             Err(e) => Err(format!("Failed to access displays: {}", e)),
         }
@@ -174,6 +287,101 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_output_uses_backing_pixels_without_changing_logical_crop() {
+        use super::*;
+        let crop = CaptureRegion {
+            x: 100,
+            y: 200,
+            width: 800,
+            height: 600,
+        };
+        let (r, size) = capture_geometry(
+            2000,
+            1200,
+            2.0,
+            Some(&crop),
+            Some(&CaptureSize {
+                width: 1600,
+                height: 1200,
+            }),
+        )
+        .unwrap();
+        assert_eq!((r.x, r.y, r.width, r.height), (100, 200, 800, 600));
+        assert_eq!((size.width, size.height), (1600, 1200));
+        let (_, capped) = capture_geometry(
+            2000,
+            1200,
+            1.0,
+            Some(&crop),
+            Some(&CaptureSize {
+                width: 1600,
+                height: 1200,
+            }),
+        )
+        .unwrap();
+        assert_eq!((capped.width, capped.height), (800, 600));
+        let (_, small) = capture_geometry(
+            2560,
+            1440,
+            1.0,
+            None,
+            Some(&CaptureSize {
+                width: 1280,
+                height: 720,
+            }),
+        )
+        .unwrap();
+        assert_eq!((small.width, small.height), (1280, 720));
+    }
+    #[test]
+    fn crop_validation_and_rounding_share_one_geometry() {
+        use super::*;
+        let crop = CaptureRegion {
+            x: 1900,
+            y: 1100,
+            width: 300,
+            height: 300,
+        };
+        let (r, size) = capture_geometry(
+            2000,
+            1200,
+            2.0,
+            Some(&crop),
+            Some(&CaptureSize {
+                width: 101,
+                height: 101,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            (r.width, r.height, size.width, size.height),
+            (100, 100, 101, 101)
+        );
+        assert!(
+            capture_geometry(
+                2000,
+                1200,
+                1.0,
+                Some(&CaptureRegion { x: 2000, ..crop }),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            capture_geometry(
+                2000,
+                1200,
+                1.0,
+                None,
+                Some(&CaptureSize {
+                    width: 0,
+                    height: 10
+                })
+            )
+            .is_err()
+        );
+    }
     use super::*;
 
     #[test]

@@ -23,13 +23,14 @@ import {
   TICKS_PER_SECOND,
 } from "@/lib/editor-time";
 import type { Clip, Track, Params } from "@/types/editor";
+import { timelineScrubTime } from "@/lib/timeline-scrub";
 
 export function EditorTimeline({
   time,
   onSeek,
 }: {
   time: string;
-  onSeek: (time: string) => void;
+  onSeek: (time: string, options?: { flush?: boolean }) => void;
 }) {
   const { snapshot, execute } = useEditor();
   const [transition, setTransition] = useState<string | null>(null);
@@ -41,6 +42,22 @@ export function EditorTimeline({
     return () => window.removeEventListener("editor-tool", set);
   }, []);
   const [scroll, setScroll] = useState({ left: 0, width: 1000 });
+  const scrub = useRef<{ pointer: number; ruler: HTMLDivElement } | null>(null);
+  const clearScrub = () => {
+    const active = scrub.current;
+    scrub.current = null;
+    if (!active) return;
+    active.ruler.classList.remove("is-scrubbing");
+    if (active.ruler.hasPointerCapture(active.pointer))
+      active.ruler.releasePointerCapture(active.pointer);
+  };
+  useEffect(() => {
+    window.addEventListener("blur", clearScrub);
+    return () => {
+      window.removeEventListener("blur", clearScrub);
+      clearScrub();
+    };
+  }, [snapshot?.path, snapshot?.state.active_sequence]);
   const seq = snapshot?.sequence;
   const tracks = seq
     ? [...seq.video_tracks].reverse().concat(seq.audio_tracks)
@@ -51,6 +68,14 @@ export function EditorTimeline({
   const run = (id: string, params: Params = {}) => {
     void execute(id, params).catch(() => {});
   };
+  function scrubTo(e: React.PointerEvent<HTMLDivElement>, flush = false) {
+    if (!seq) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    onSeek(
+      timelineScrubTime(e.clientX, rect.left, rect.width, zoom, seq.settings.frame_rate),
+      { flush },
+    );
+  }
   if (!seq)
     return (
       <div className="editor-empty">
@@ -172,14 +197,28 @@ export function EditorTimeline({
           <div
             className="editor-ruler"
             style={{ width, marginLeft: 112 }}
-            onPointerDown={(e) =>
-              onSeek(
-                tickAtSeconds(
-                  (e.clientX - e.currentTarget.getBoundingClientRect().left) /
-                    zoom,
-                ).toString(),
-              )
-            }
+            onPointerDown={(e) => {
+              if (e.button !== 0 || !e.isPrimary || scrub.current) return;
+              e.preventDefault();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              scrub.current = { pointer: e.pointerId, ruler: e.currentTarget };
+              e.currentTarget.classList.add("is-scrubbing");
+              scrubTo(e);
+            }}
+            onPointerMove={(e) => {
+              if (scrub.current?.pointer === e.pointerId) scrubTo(e);
+            }}
+            onPointerUp={(e) => {
+              if (scrub.current?.pointer !== e.pointerId) return;
+              scrubTo(e, true);
+              clearScrub();
+            }}
+            onPointerCancel={(e) => {
+              if (scrub.current?.pointer === e.pointerId) clearScrub();
+            }}
+            onLostPointerCapture={(e) => {
+              if (scrub.current?.pointer === e.pointerId) clearScrub();
+            }}
           >
             {Array.from(
               { length: Math.ceil(scroll.width / 80) + 3 },

@@ -169,7 +169,7 @@ The modal Settings dialog becomes a persistent, collapsible **Inspector** on the
 
 ### Toolbar (44px, `bg-surface border-b`)
 Left → right:
-1. **Record/Stop** — the hero: capsule `variant="record"` h-7 px-3, `Circle` filled icon + "Record"; while recording it becomes **Stop** (`Square` icon) followed by the live duration in `tabular-nums` and a pulsing red dot. Disabled (with tooltip "Add a source to start recording") when there is no content.
+1. **Record/Stop** — the hero: capsule `variant="record"` h-7 px-3, `Circle` filled icon + "Record"; while recording it becomes **Stop** (`Square` icon) followed by the live duration in `tabular-nums` and a pulsing red dot. Disabled (with tooltip "Add a source to start recording") when the current layout has no content. While reconciling native capture settings before recording, show "Preparing…" and disable the button and inspector settings until preparation finishes.
 2. **Status chips** (what Record will capture): section count, mic, system audio — `bg-fill rounded-md h-6 px-1.5 text-caption text-muted-foreground`, icon + count, each with tooltip; `AnimatePresence`. While recording, the existing per-source StereoMeters render here (same condition as today).
 3. flex spacer.
 4. File actions, icon+label `ghost` size sm: **Open…** (`FolderOpen`), **Show in Finder** (`FolderSearch`, was "Export" — it reveals the saved file, §16 direct labels). Labels collapse to icon-only + tooltip below 720px.
@@ -201,15 +201,16 @@ Clip chip = button `h-8 rounded-md bg-fill hover:bg-fill-hover px-2.5 gap-2`: `F
 ### Dialogs
 - **Record source** (`record-modal`): width 380px; title "Add Source to Section N" / "Change Section N"; two side-by-side tiles (`h-24 rounded-xl bg-fill hover:bg-fill-hover flex-col gap-2`, 28px icon, title `text-headline`, caption `text-caption text-muted-foreground`): "Screen — Capture a display or region", "Camera — Use a connected camera". "Clear Section" = `destructive` plain button, left-aligned in footer.
 - **Camera select**: width 480px; preview `aspect-video bg-stage rounded-lg`; camera list as a macOS source list (rows `h-8 rounded-md px-2`, selected `bg-accent text-accent-foreground` + check); footer Cancel (`default`) + "Use Camera" (`accent`).
-- **Display picker** (inside preview.tsx): same source-list row style; dimensions right-aligned `text-caption tabular-nums`.
+- **Display picker** (macOS): 600 px sheet bounded to the window, with a two-column gallery of screen stills, including a single-screen setup. Cards preserve the entire image with `object-contain` on `bg-stage`; selected cards use an accent outline and checkmark, plus a primary-display badge and backing-pixel dimensions. Use native radio inputs for keyboard/VoiceOver selection. Keep the gallery scrollable and the footer fixed: Refresh, Cancel, Continue. Capture on open and manual Refresh only; no recurring capture. Refresh remains focusable while busy using `aria-disabled`. Other platforms retain their existing source list.
 - **Trim editor** (sheet, `max-w-[720px] w-[calc(100vw-48px)]`): video `rounded-lg bg-stage`; range slider per §6 with selected range `bg-accent`, inactive segments `bg-accent/30 hover:bg-accent/45`; filmstrip `rounded-md overflow-hidden` with 1px gaps; In / Keeping / Out row `text-callout tabular-nums`, labels `text-muted-foreground`; segment chips `rounded-md h-6 px-2 text-caption tabular-nums`, active `bg-accent text-accent-foreground`, inactive `bg-fill`. Footer: left `Preview` (play/pause, `secondary`) + `Cut` (`default`); right "Frame-accurate" **Switch** with label, "Skip" → keep wording unless the original is already saved (then "Close"), primary "Save Trimmed Clip" (`accent`, spinner while exporting).
 
 ### Region selector (full-window overlay)
 - Scrim `bg-black/70`; heading `text-title text-white` + caption `text-white/60`.
 - Screen preview `rounded-lg overflow-hidden shadow-sheet ring-1 ring-white/10`; outside-selection mask `bg-black/55`.
+- Native screen selection carries its still into the crop overlay and requests a larger image. Refresh Preview preserves crop coordinates and focus. The browser path continues to use live video. Each opening resets the crop to the centered 50% selection. Arrow keys move it; Option + arrows resize; Shift increases the step. The overlay uses the existing dialog focus trap and Escape handling.
 - Selection: 1.5px `--record` border, no dashed inner box; 8 handles = 9px white circles (corners) / 14×6 white capsules (edges) with `shadow-[0_0_0_1px_hsl(var(--record)),0_1px_3px_rgba(0,0,0,.4)]`; hit area ≥ 20px via transparent padding; center crosshair removed (cursor `move` conveys it). Dimension label `.mat-hud rounded-md text-micro font-mono` below the box.
 - Controls in a `.mat-hud rounded-xl p-1.5 gap-1.5` bar: Cancel (`hud`), Full Screen (`hud`), **Confirm Region** (`record`). Position/size readout `text-caption font-mono text-white/50`.
-- Interaction per §5 (Pointer Events, capture, grab offset, rubber-band, velocity spring-back). Keep every existing clamp/min-size rule and the coordinate math in screen pixels.
+- Interaction per §5 (Pointer Events, capture, grab offset, rubber-band, velocity spring-back). Keep clamp/min-size rules. Crop coordinates are display-local logical points on macOS, pixels on other platforms; preview image pixels and Retina backing scale never change crop coordinates.
 
 ### Error boundary
 Centered `max-w-md` card: `AlertTriangle` in `text-warning`, `text-title` "Something went wrong", error message in `rounded-md bg-fill p-3 text-caption font-mono`, `accent` "Reload" button.
@@ -230,6 +231,8 @@ The shared 40 px mode bar uses the existing segmented control for **Recording Mo
 A 44 px editor toolbar holds project actions, workspace selection, panel arrangement, Quick Trim and Export. Docked panel tab headers are 32 px. At 800×600, Media and Inspector share a tab group; the Program/Source monitors share another, with the timeline below. Resizable panels scroll internally. Assembly, Editing, Color, Effects and Audio presets offer focused layouts. Panels can be opened, moved and restored with toolbar menus as well as dragging.
 
 The dark media stage is content chrome, including in light appearance. Blue marks selected clips, focus, active tools and the playhead. Green depicts audio waveforms/meters. Effect color samples, media colors and scope pixels represent actual content and are exempt from structural chrome tokens. Red remains reserved for recording and destructive/error states.
+
+Dragging the timeline ruler or playhead head scrubs to the nearest sequence frame, pauses playback and stays paused on release. Pointer capture keeps the gesture active outside the ruler; only the ruler suppresses text selection and touch scrolling. The ruler uses a horizontal resize cursor while scrubbing. Clip bodies and trim handles retain their editing gestures, and blank tracks do not start scrubbing.
 
 Parameter inspectors use labeled fields and collapsible groups; complex controls have keyboard alternatives (numeric vertices/handles, keyframe nudges, panel placement menus). All Actions provides searchable advanced forms, with unavailable operations disabled and an explanation. Long paths are exposed in tooltips while compact rows display basenames. Empty panels explain which selection or media is needed.
 

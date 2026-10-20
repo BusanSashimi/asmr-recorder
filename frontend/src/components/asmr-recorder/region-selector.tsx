@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { createPortal } from "react-dom";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Dialog, DialogPortal, DialogOverlay, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { animate, useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { Check, X, Maximize2 } from "lucide-react";
+import { Check, X, Maximize2, RefreshCw, Loader2 } from "lucide-react";
 import { spring, rubberband } from "@/lib/motion";
 
 interface RegionSelectorProps {
@@ -13,6 +14,13 @@ interface RegionSelectorProps {
   screenWidth?: number;
   screenHeight?: number;
   stream?: MediaStream | null;
+  previewUrl?: string;
+  previewLoading?: boolean;
+  previewError?: string;
+  confirming?: boolean;
+  onRefreshPreview?: () => void;
+  onOpenSettings?: () => void;
+  onCloseAutoFocus?: (event: Event) => void;
 }
 
 interface Region {
@@ -24,13 +32,18 @@ interface Region {
 
 const MIN_SIZE = 100;
 
-export function RegionSelector({
-  open,
+export function RegionSelector(props: RegionSelectorProps) {
+  // A fresh mount resets crop/gesture state for every opening, including browser capture.
+  return props.open ? <RegionSelectorContent {...props} /> : null;
+}
+
+function RegionSelectorContent({
   onClose,
   onConfirm,
   screenWidth = 1920,
   screenHeight = 1080,
-  stream,
+  stream, previewUrl, previewLoading = false, previewError, confirming = false,
+  onRefreshPreview, onOpenSettings, onCloseAutoFocus,
 }: RegionSelectorProps) {
   const [region, setRegion] = useState<Region>({
     x: screenWidth * 0.25,
@@ -53,9 +66,15 @@ export function RegionSelector({
   const offsetSamplesRef = useRef<Array<{ x: number; y: number; t: number }>>([]);
   const prefersReducedMotion = useReducedMotion();
 
+  const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
+  useEffect(() => {
+    const resize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
+    window.addEventListener("resize", resize);
+    return () => { window.removeEventListener("resize", resize); animXRef.current?.stop(); animYRef.current?.stop(); };
+  }, []);
   const scale = Math.min(
-    (window.innerWidth - 100) / screenWidth,
-    (window.innerHeight - 200) / screenHeight,
+    Math.max(1, viewport.width - 64) / screenWidth,
+    Math.max(1, viewport.height - (previewError ? 280 : 220)) / screenHeight,
     1
   );
 
@@ -64,6 +83,7 @@ export function RegionSelector({
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent, action: "drag" | string) => {
+      if (confirming) return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -91,7 +111,7 @@ export function RegionSelector({
       // Capture pointer on the container so pointermove/pointerup arrive there
       containerRef.current?.setPointerCapture(e.pointerId);
     },
-    [region, scale]
+    [region, scale, confirming]
   );
 
   const handlePointerMove = useCallback(
@@ -267,8 +287,6 @@ export function RegionSelector({
     });
   };
 
-  if (!open) return null;
-
   const scaledRegion = {
     x: region.x * scale + visualOffset.x,
     y: region.y * scale + visualOffset.y,
@@ -282,15 +300,22 @@ export function RegionSelector({
 
   // Portaled: the preview stage is a size container, which would otherwise
   // become the containing block for this fixed overlay.
-  return createPortal(
-    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center">
+  return (
+    <Dialog open onOpenChange={value => { if (!value && !confirming) onClose(); }}>
+    <DialogPortal>
+    <DialogOverlay className="bg-black/70" />
+    <DialogPrimitive.Content className="fixed inset-0 z-50 flex items-center justify-center outline-none text-white"
+      onCloseAutoFocus={onCloseAutoFocus}
+      onEscapeKeyDown={event => { if (confirming) event.preventDefault(); }}
+      onPointerDownOutside={event => event.preventDefault()}>
+
       <div className="flex flex-col items-center gap-4">
         {/* Header */}
         <div className="text-center">
-          <h2 className="text-title text-white">Select Capture Region</h2>
-          <p className="text-caption text-white/60 mt-0.5">
-            Drag to move, resize from corners or edges
-          </p>
+          <DialogTitle className="text-title text-white">Select Capture Region</DialogTitle>
+          <DialogDescription className="text-caption text-white/60 mt-0.5">
+            Drag to move or resize. Arrow keys move; Option + arrows resize.
+          </DialogDescription>
         </div>
 
         {/* Screen preview container */}
@@ -302,6 +327,8 @@ export function RegionSelector({
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerCancel}
         >
+          {previewUrl && <img src={previewUrl} alt="Selected display" draggable={false}
+            className="absolute inset-0 w-full h-full object-contain bg-black pointer-events-none" />}
           {/* Video feed background */}
           {stream && (
             <video
@@ -314,7 +341,7 @@ export function RegionSelector({
           )}
 
           {/* Fallback grid pattern when no stream */}
-          {!stream && (
+          {!stream && !previewUrl && (
             <div className="absolute inset-0">
               <div className="absolute inset-0 opacity-10">
                 <div
@@ -372,7 +399,22 @@ export function RegionSelector({
 
           {/* Selection box */}
           <div
-            className="absolute cursor-move"
+            className="absolute cursor-move focus-visible:outline focus-visible:outline-2 focus-visible:outline-white"
+            tabIndex={0} role="group" aria-label="Capture region. Arrow keys move; Option and arrow keys resize. Shift increases the step."
+            onKeyDown={event => {
+              if (confirming || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+              event.preventDefault();
+              const step = event.shiftKey ? 10 : 1;
+              const dx = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
+              const dy = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0;
+              setRegion(previous => event.altKey ? { ...previous,
+                width: Math.max(Math.min(MIN_SIZE, screenWidth), Math.min(screenWidth - previous.x, previous.width + dx)),
+                height: Math.max(Math.min(MIN_SIZE, screenHeight), Math.min(screenHeight - previous.y, previous.height + dy)),
+              } : { ...previous,
+                x: Math.max(0, Math.min(screenWidth - previous.width, previous.x + dx)),
+                y: Math.max(0, Math.min(screenHeight - previous.height, previous.y + dy)),
+              });
+            }}
             style={{
               left: scaledRegion.x,
               top: scaledRegion.y,
@@ -464,11 +506,18 @@ export function RegionSelector({
           </div>
         </div>
 
+        {previewError && <p className="max-w-[min(600px,calc(100vw-48px))] rounded-lg mat-hud p-2 text-callout text-white" role="status">{previewError}</p>}
         {/* Controls bar */}
-        <div className="mat-hud rounded-xl p-1.5 flex items-center gap-1.5">
+        <div className="mat-hud rounded-xl p-1.5 flex flex-wrap justify-center items-center gap-1.5 max-w-[calc(100vw-32px)]">
+          {onRefreshPreview && <Button variant="hud" size="sm" aria-disabled={previewLoading || confirming} className="aria-disabled:opacity-40"
+            onClick={() => { if (!previewLoading && !confirming) onRefreshPreview(); }}>
+            {previewLoading ? <Loader2 className="motion-safe:animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
+            Refresh Preview
+          </Button>}
+          {onOpenSettings && <Button variant="hud" size="sm" onClick={onOpenSettings}>Open System Settings</Button>}
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="hud" size="sm" onClick={onClose} aria-label="Cancel">
+              <Button variant="hud" size="sm" onClick={onClose} disabled={confirming} aria-label="Cancel">
                 <X className="h-4 w-4 mr-1.5" />
                 Cancel
               </Button>
@@ -482,6 +531,7 @@ export function RegionSelector({
                 variant="hud"
                 size="sm"
                 aria-label="Full Screen"
+                disabled={confirming}
                 onClick={() =>
                   setRegion({ x: 0, y: 0, width: screenWidth, height: screenHeight })
                 }
@@ -495,8 +545,8 @@ export function RegionSelector({
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="record" size="sm" onClick={handleConfirm} aria-label="Confirm Region">
-                <Check className="h-4 w-4 mr-1.5" />
+              <Button variant="record" size="sm" onClick={handleConfirm} disabled={confirming} aria-label="Confirm Region">
+                {confirming ? <Loader2 className="h-4 w-4 motion-safe:animate-spin" aria-hidden="true" /> : <Check className="h-4 w-4 mr-1.5" />}
                 Confirm Region
               </Button>
             </TooltipTrigger>
@@ -510,7 +560,8 @@ export function RegionSelector({
           Size: {Math.round(region.width)} × {Math.round(region.height)}
         </p>
       </div>
-    </div>,
-    document.body
+    </DialogPrimitive.Content>
+    </DialogPortal>
+    </Dialog>
   );
 }

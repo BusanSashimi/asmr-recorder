@@ -6,6 +6,10 @@ mod editor_playback;
 
 mod recording;
 mod screen;
+mod latest_frame;
+#[cfg(target_os = "macos")]
+mod screen_frame_status;
+mod screen_preview;
 mod screen_stream;
 mod system_audio;
 mod system_audio_stream;
@@ -151,6 +155,8 @@ pub fn run() {
             editor::editor_shutdown,
             editor::editor_query,
             screen::list_displays,
+            screen_preview::capture_display_preview,
+            screen_preview::open_screen_recording_settings,
             recording::get_available_devices,
             recording::list_audio_apps,
             save_media_recording,

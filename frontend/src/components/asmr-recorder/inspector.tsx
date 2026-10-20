@@ -81,12 +81,13 @@ export function Inspector({ pendingUpdate, onCheckUpdate }: InspectorProps) {
     externalConfig,
     updateExternalConfig,
     isExternalRecording,
+    isPreparingCapture,
   } = useRecordingContext();
 
   const [audioApps, setAudioApps] = useState<AudioApp[]>([]);
   const audioAppsLoadedRef = useRef(false);
 
-  const isLocked = status.isRecording || isExternalRecording;
+  const isLocked = status.isRecording || isExternalRecording || isPreparingCapture;
 
   const loadAudioApps = useCallback(async () => {
     if (audioAppsLoadedRef.current) return;

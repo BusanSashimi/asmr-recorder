@@ -48,6 +48,50 @@ the frontend over Tauri `Channel`s.
 | `lib.rs`                  | Plugin + command wiring and the `save_media_recording` save command |
 | `main.rs`                 | 4-line shim → `asmr_recorder_lib::run()` |
 
+Native screen targets come from the recording layout's pixel requirements and the
+selected crop's backing scale. ScreenCaptureKit crops in logical points and outputs
+the requested pixel dimensions before Rust copies the buffer. The macOS queue holds
+one pending owned frame, replacing it with newer complete frames. The JPEG worker
+reserves one of two delivery credits before taking a frame; acknowledgements include
+a stream identifier so retired channels cannot credit a replacement stream.
+
+Changing layout, resolution, or frame rate reconciles native streams before Record
+can start. Sections absent from the layout pause while retaining their source choices.
+Replacement capture starts before the old stream is released. The frame-status reader
+uses CoreFoundation numeric attachments directly because the pinned wrapper attempts
+an invalid NSNumber-to-Swift-enum cast. Pending startup frames and decoded images are
+retained until the active preview canvas can consume them.
+
+Stream isolation requires `screencapturekit` 1.5.4 or newer. Version 1.5.0 sent
+each sample to every globally registered handler, so cells assigned to different
+displays could all show the same image. The dependency's
+[upstream fix](https://github.com/doom-fish/screencapturekit-rs/pull/136) routes
+callbacks through a context owned by each stream. Run
+`python3 scripts/check-native-stream-routing.py` to exercise the resolved
+dependency's actual callback with distinct source markers and balanced sample
+references, without requesting screen permission. It fails on 1.5.0 and passes
+on 1.5.4. Frontend channel mocks alone cannot catch this native dependency bug.
+After the update, a signed release build was verified with four distinct full
+displays in the live Grid and an extracted frame from a saved 2560×1440 take.
+The take decoded without errors and passed the timing check (+19 ms start,
++49 ms end audio-minus-video offsets). Recording/Editing transitions also
+restored the individual sources.
+
+Initial timing validation on macOS 27 (2026-10-19), using the certificate-signed
+optimized app: the 2560×1440/30 Grid take and 1920×1080/60 Solo take decoded without errors
+and passed `scripts/check-recording-timing.py`; audio-minus-video start/end offsets
+were +16/+4 ms and +3/+45 ms respectively. The Solo take averaged 56.3 encoded
+frames/s under system load; this is not a guarantee of sustained 60 fps. Those
+timing checks did not verify source identity and preceded the routing correction.
+
+An isolated optimized benchmark used the same BGRA fixture, JPEG quality 80,
+conversion and JPEG worker functions, with five warmups and 30 samples per case
+over three runs. Median-of-run-medians fell from 44.291 ms for 2560×1440 input
+resized in Rust to 10.020 ms for pre-sized 1280×720 input (77.4% less worker time).
+This excludes native scaling, IPC, WebKit decoding, and final video encoding;
+it does not establish a whole-app CPU reduction. Hardware validation on macOS 14
+and Windows remains outstanding.
+
 ScreenCaptureKit uses Swift interop, so the binary must be launched with
 `DYLD_LIBRARY_PATH=/usr/lib/swift` (injected by the `npm run tauri` script and `dev.sh`).
 

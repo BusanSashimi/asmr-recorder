@@ -212,6 +212,12 @@ button.editor-list-row:hover {
   background: hsl(var(--surface));
   border-bottom: 1px solid hsl(var(--separator));
   cursor: crosshair;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+.editor-ruler.is-scrubbing {
+  cursor: ew-resize;
 }
 .editor-ruler span {
   position: absolute;

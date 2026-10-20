@@ -4,6 +4,8 @@ import { defaultRecordingConfig, defaultSectionState, defaultExternalRecordingCo
 import { hasMediaApi } from "@/lib/utils";
 import { useAudioMonitor, type AudioMonitorState } from "@/hooks/use-audio-monitor";
 import { useSystemAudioMonitor } from "@/hooks/use-system-audio-monitor";
+import { prepareNativeScreens, reconcileNativeScreens } from "@/lib/native-screen";
+import { computeSlots } from "@/lib/layouts";
 import type {
   RecordingConfig,
   RecordingStatus,
@@ -17,6 +19,7 @@ interface RecordingContextValue {
   captureActive: boolean;
   setCaptureActive: (active: boolean) => void;
   isSaving: boolean;
+  isPreparingCapture: boolean;
   config: RecordingConfig;
   updateConfig: (updates: Partial<RecordingConfig>) => void;
   status: RecordingStatus;
@@ -52,6 +55,8 @@ const RecordingContext = createContext<RecordingContextValue | null>(null);
 export function RecordingProvider({ children }: { children: React.ReactNode }) {
   const [captureActive, setCaptureActive] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isPreparingCapture, setIsPreparingCapture] = useState(false);
+  const preparingRef = useRef(false);
   const [hasUnsavedTake,setHasUnsavedTake] = useState(false);
   const [config, setConfig] = useState<RecordingConfig>(defaultRecordingConfig);
   const [status, setStatus] = useState<RecordingStatus>({
@@ -65,6 +70,8 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   
   // Section-based recording state
   const [sectionState, setSectionState] = useState<SectionState>(defaultSectionState);
+  const currentSections = useRef(sectionState.sections);
+  useEffect(() => { currentSections.current = sectionState.sections; }, [sectionState.sections]);
   const [browserDevices, setBrowserDevices] = useState<MediaDeviceInfo[]>([]);
 
   // External frame recording state — initialised from localStorage so layout,
@@ -81,6 +88,16 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
   });
   const [isExternalRecording, setIsExternalRecording] = useState(false);
   const recordingStartTimeRef = useRef<number>(0);
+
+  useEffect(() => {
+    let current = true;
+    void reconcileNativeScreens(externalConfig).catch(error => {
+      if (current && !(error && typeof error === "object" && error.kind === "cancelled")) {
+        setError(error && typeof error === "object" && "message" in error ? String(error.message) : String(error));
+      }
+    });
+    return () => { current = false; };
+  }, [externalConfig]);
 
   // Live mic monitor — decoupled from the recording pipeline, runs whenever mic
   // is enabled so the level meter is visible while adjusting gain.
@@ -207,19 +224,30 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
 
   // Start recording via MediaRecorder (browser-native canvas recording)
   const startExternalRecording = useCallback(async () => {
+    if (preparingRef.current || isExternalRecording) return;
     if (hasUnsavedTake) throw new Error("Retry saving the previous recording before starting another.");
     if (isSaving) throw new Error("Wait for the previous recording to finish saving.");
     setError(null);
+    preparingRef.current = true;
+    setIsPreparingCapture(true);
     try {
+      await prepareNativeScreens(externalConfig);
+      if (!computeSlots(externalConfig.layout, externalConfig).some(slot => currentSections.current[slot.section].source !== null)) {
+        throw new Error("Add a source to the current layout before recording.");
+      }
       recordingStartTimeRef.current = Date.now();
       setIsExternalRecording(true);
       setStatus((prev) => ({ ...prev, isRecording: true, durationMs: 0, frameCount: 0 }));
     } catch (err) {
-      const errorMessage = String(err);
+      if (err && typeof err === "object" && "kind" in err && err.kind === "cancelled") throw err;
+      const errorMessage = err && typeof err === "object" && "message" in err ? String(err.message) : String(err);
       setError(errorMessage);
-      throw err;
+      throw new Error(errorMessage);
+    } finally {
+      preparingRef.current = false;
+      setIsPreparingCapture(false);
     }
-  }, [isSaving,hasUnsavedTake]);
+  }, [isSaving,hasUnsavedTake,isExternalRecording,externalConfig]);
 
   // Stop recording (MediaRecorder will save the file asynchronously via recording-canvas)
   const stopExternalRecording = useCallback(async () => {
@@ -351,6 +379,7 @@ export function RecordingProvider({ children }: { children: React.ReactNode }) {
     captureActive,
     setCaptureActive,
     isSaving,
+    isPreparingCapture,
     config,
     updateConfig,
     status,

@@ -16,7 +16,8 @@
 ## ✨ Features
 
 - 🎙️ **System + Mic Audio** — Microphone via `getUserMedia`; system / per-app audio captured natively through ScreenCaptureKit (macOS 14+)
-- 🖥️ **Native Screen & Region Capture** — Full-display or cropped-region capture via ScreenCaptureKit, streamed to the UI over a Tauri Channel
+- 🖥️ **Native Screen & Region Capture** — ScreenCaptureKit crops and scales to the recording layout before copying frames; a latest-frame buffer keeps memory and latency bounded
+- 🖼️ **Screen Preview Gallery** — Choose a display from still thumbnails, refresh on demand, and position the crop over a larger preview
 - 🧩 **Multi-Section Composition** — Composite multiple screen/camera sources onto one canvas, encoded in-browser with WebCodecs (H.264)
 - 🎬 **Recording & Editing Modes** — Saved takes open in a native FilmCraft-powered editor with a multitrack timeline, effects, keyframes, masks, graphics, captions, mixing, multicam and export
 - 🗂️ **Editing Workspaces** — Dockable Apple-styled panels, native `.fcproj` projects, autosave/recovery, proxies and interchange
@@ -51,6 +52,16 @@ ScreenCaptureKit uses Swift interop, so the dynamic linker must see the Swift ru
 (`DYLD_LIBRARY_PATH=/usr/lib/swift`). The `npm run tauri` script (and `dev.sh`) inject this
 automatically — always launch via `npm run tauri dev` / `npm run tauri build` (or `./dev.sh`),
 never a bare `tauri`, or the `screencapturekit` bindings fail to load.
+
+For screen/audio permission testing, run the packaged `.app` from a certificate-signed debug build:
+
+```bash
+npm run tauri -- build --debug --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+The launcher automatically selects the single valid **Apple Development** certificate in Keychain, or uses `APPLE_SIGNING_IDENTITY` when explicitly set. It stops debug bundle builds if a certificate is unavailable instead of generating another ad-hoc identity. Set up the free development certificate through Xcode's signed-in Personal Team/automatic signing first. Certificates and private keys stay in Keychain, outside the repository.
+
+macOS ties screen/audio grants to a code-signing requirement. Ad-hoc builds change that requirement when their executable changes, even if the permission switch stays on. After moving to certificate signing, renew the existing grant once and keep launching the same app bundle. Plain `tauri dev` runs a separate development executable and is not the packaged capture-permission test path. See [Apple's explanation](https://developer.apple.com/forums/thread/819406) and [Tauri signing setup](https://v2.tauri.app/distribute/sign/macos/).
 
 </details>
 
@@ -110,6 +121,12 @@ This command will:
 ```bash
 npm run tauri build
 ```
+
+Profile capture using a certificate-signed **release** `.app`; debug builds leave Rust image processing unoptimized. Native source resolution follows the selected output layout, including full-detail Solo/PiP backgrounds. Sources outside the layout pause until needed again.
+
+Web Inspector is enabled in local release builds through Tauri's `devtools` feature. On macOS, press **⌘ Option I** or right-click and choose **Inspect Element**.
+
+On macOS 27 with the pinned Rust 1.95 toolchain, set `CARGO_PROFILE_RELEASE_STRIP=none` and `CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` for local release builds. This avoids an upstream Mach-O stripping problem that prevents compiler plugins from loading; optimization remains enabled. See the [Rust compiler issue](https://github.com/rust-lang/rust/issues/157750). Use the existing certificate through `APPLE_SIGNING_IDENTITY` for local signing.
 
 ---
 
